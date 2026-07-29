@@ -167,13 +167,23 @@ public final class Module implements IXposedHookLoadPackage {
 
     private static boolean isFastFeedTargetClass(String className) {
         return "X.1fM".equals(className)
+                || "X.1eY".equals(className)
                 || "X.21p".equals(className)
+                || "X.211".equals(className)
                 || "X.baJ".equals(className)
+                || "X.bB9".equals(className)
                 || "X.baK".equals(className)
+                || "X.bBA".equals(className)
                 || "X.21O".equals(className)
+                || "X.20a".equals(className)
+                || "X.1vr".equals(className)
                 || "X.3YX".equals(className)
+                || "X.3Xk".equals(className)
                 || "X.2OT".equals(className)
-                || "X.2Oc".equals(className);
+                || "X.2Oc".equals(className)
+                || "X.2mm".equals(className)
+                || "X.2Nf".equals(className)
+                || "X.2No".equals(className);
     }
 
     private static void tryInstallFastFeedHooksAtDexReady(
