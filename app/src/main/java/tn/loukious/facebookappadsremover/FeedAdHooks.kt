@@ -3,8 +3,8 @@ package tn.loukious.facebookappadsremover
 import android.app.Activity
 import android.os.Bundle
 import android.view.View
-import de.robv.android.xposed.XC_MethodHook
-import de.robv.android.xposed.XposedBridge
+import io.github.libxposed.api.XposedModule
+import io.github.libxposed.api.XposedInterface
 import org.luckypray.dexkit.DexKitBridge
 import org.luckypray.dexkit.query.enums.MatchType
 import org.luckypray.dexkit.query.enums.StringMatchType
@@ -838,46 +838,43 @@ internal fun logFeedItems(source: String, items: Iterable<*>, feedItemInspector:
     Logger.i(TAG, "FeedItem $source count=$index")
 }
 
-internal fun hookStoryAdsMerge(method: Method, source: String) {
-    XposedBridge.hookMethod(method, object : XC_MethodHook() {
-        override fun beforeHookedMethod(param: MethodHookParam) {
-            val originalBuckets = param.args.getOrNull(2)
-            if (originalBuckets != null) {
-                param.result = originalBuckets
-                Logger.i(TAG, "Blocked story ad bucket merge in $source")
-            }
+internal fun hookStoryAdsMerge(module: XposedModule, method: Method, source: String) {
+    module.hook(method).intercept { chain ->
+        val originalBuckets = chain.args.getOrNull(2)
+        if (originalBuckets != null) {
+            Logger.i(TAG, "Blocked story ad bucket merge in $source")
+            return@intercept originalBuckets
         }
-    })
+        chain.proceed()
+    }
 }
 
-internal fun hookStoryAdsNoOp(method: Method, reason: String, source: String) {
-    XposedBridge.hookMethod(method, object : XC_MethodHook() {
-        override fun beforeHookedMethod(param: MethodHookParam) {
-            param.result = null
-            Logger.i(TAG, "Blocked $reason in $source")
-        }
-    })
+internal fun hookStoryAdsNoOp(module: XposedModule, method: Method, reason: String, source: String) {
+    module.hook(method).intercept { chain ->
+        Logger.i(TAG, "Blocked $reason in $source")
+        null
+    }
 }
 
-internal fun hookStoryAdProvider(provider: StoryAdProviderHooks) {
+internal fun hookStoryAdProvider(module: XposedModule, provider: StoryAdProviderHooks) {
     if (!storyAdProviderClassesHooked.add(provider.providerClass.name)) return
 
     val hooked = ArrayList<String>()
 
     provider.mergeMethod?.let { method ->
-        hookStoryAdsMerge(method, provider.providerClass.name)
+        hookStoryAdsMerge(module, method, provider.providerClass.name)
         hooked.add("merge")
     }
     provider.fetchMoreAdsMethod?.let { method ->
-        hookStoryAdsNoOp(method, "story ad fetchMoreAds", provider.providerClass.name)
+        hookStoryAdsNoOp(module, method, "story ad fetchMoreAds", provider.providerClass.name)
         hooked.add("fetchMoreAds")
     }
     provider.deferredUpdateMethod?.let { method ->
-        hookStoryAdsNoOp(method, "story ad deferred update", provider.providerClass.name)
+        hookStoryAdsNoOp(module, method, "story ad deferred update", provider.providerClass.name)
         hooked.add("deferredUpdate")
     }
     provider.insertionTriggerMethod?.let { method ->
-        hookStoryAdsNoOp(method, "story ad insertion trigger", provider.providerClass.name)
+        hookStoryAdsNoOp(module, method, "story ad insertion trigger", provider.providerClass.name)
         hooked.add("insertionTrigger")
     }
 
@@ -886,7 +883,7 @@ internal fun hookStoryAdProvider(provider: StoryAdProviderHooks) {
     }
 }
 
-internal fun hookSponsoredPoolListMethods(poolClass: Class<*>) {
+internal fun hookSponsoredPoolListMethods(module: XposedModule, poolClass: Class<*>) {
     var hooked = 0
     poolClass.declaredMethods
         .filter { method ->
@@ -896,17 +893,13 @@ internal fun hookSponsoredPoolListMethods(poolClass: Class<*>) {
         }
         .forEach { method ->
             method.isAccessible = true
-            XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    param.result = arrayListOf<Any?>()
-                }
-            })
+            module.hook(method).intercept { arrayListOf<Any?>() }
             hooked++
         }
     Logger.i(TAG, "Hooked $hooked feed pool list method(s) on ${poolClass.name}")
 }
 
-internal fun hookSponsoredPoolResultMethods(poolClass: Class<*>) {
+internal fun hookSponsoredPoolResultMethods(module: XposedModule, poolClass: Class<*>) {
     var hooked = 0
     poolClass.declaredMethods
         .filter { method ->
@@ -919,13 +912,9 @@ internal fun hookSponsoredPoolResultMethods(poolClass: Class<*>) {
         }
         .forEach { method ->
             method.isAccessible = true
-            XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    buildSponsoredEmptyResult(method.returnType)?.let { emptyResult ->
-                        param.result = emptyResult
-                    }
-                }
-            })
+            module.hook(method).intercept { chain ->
+                buildSponsoredEmptyResult(method.returnType) ?: chain.proceed()
+            }
             hooked++
         }
     Logger.i(TAG, "Hooked $hooked feed pool result method(s) on ${poolClass.name}")
@@ -970,13 +959,6 @@ internal fun buildImmutableListLike(sample: Any?, items: List<Any?>): Any? {
         val copyOf = immutableListClass.getDeclaredMethod("copyOf", Iterable::class.java)
         copyOf.invoke(null, items)
     }.getOrNull()
-}
-
-internal fun replaceFeedItemsInResult(param: XC_MethodHook.MethodHookParam, items: List<Any?>): Boolean {
-    val result = param.result ?: return false
-    val rebuiltResult = rebuildFeedResult(result, items) ?: return false
-    param.result = rebuiltResult
-    return true
 }
 
 internal fun rebuildFeedResult(result: Any, items: List<Any?>): Any? {
@@ -1030,30 +1012,30 @@ internal fun extractFeedItemsFromResult(result: Any?): Iterable<*>? {
     }.getOrNull()
 }
 
-internal fun hookListResultFilter(method: Method, source: String, inspector: AdStoryInspector) {
-    XposedBridge.hookMethod(method, object : XC_MethodHook() {
-        override fun afterHookedMethod(param: MethodHookParam) {
-            val result = param.result as? MutableList<Any?> ?: return
-            val removed = filterAdItems(result, inspector)
-            if (removed > 0) {
-                Logger.i(TAG, "Removed $removed ad item(s) from $source")
-            }
+internal fun hookListResultFilter(module: XposedModule, method: Method, source: String, inspector: AdStoryInspector) {
+    module.hook(method).intercept { chain ->
+        val result = chain.proceed()
+        val list = result as? MutableList<Any?> ?: return@intercept result
+        val removed = filterAdItems(list, inspector)
+        if (removed > 0) {
+            Logger.i(TAG, "Removed $removed ad item(s) from $source")
         }
-    })
+        result
+    }
 }
 
 internal fun hookFeedCsrFilterInput(
+    module: XposedModule,
     hook: FeedCsrFilterHook,
     feedItemInspector: FeedItemInspector
 ): Boolean {
     if (!feedCsrMethodsHooked.add(methodHookKey(hook.method))) {
         return false
     }
-    XposedBridge.hookMethod(hook.method, object : XC_MethodHook() {
-        override fun beforeHookedMethod(param: MethodHookParam) {
-            val filterName = hook.method.declaringClass.name
-            val originalList = param.args.getOrNull(hook.listArgIndex) as? Iterable<*>
-            if (originalList == null) return
+    module.hook(hook.method).intercept { chain ->
+        val filterName = hook.method.declaringClass.name
+        val originalList = chain.args.getOrNull(hook.listArgIndex) as? Iterable<*>
+        if (originalList != null) {
             logFeedItems("$filterName IN", originalList, feedItemInspector)
             val keptItems = ArrayList<Any?>()
             var removed = 0
@@ -1066,46 +1048,61 @@ internal fun hookFeedCsrFilterInput(
                 }
             }
 
-            if (removed <= 0) return
-
-            val rebuilt = buildImmutableListLike(param.args.getOrNull(hook.listArgIndex), keptItems) ?: return
-            param.args[hook.listArgIndex] = rebuilt
-            Logger.i(TAG, "Removed $removed sponsored feed item(s) before ${hook.method.declaringClass.name}.${hook.method.name}")
-        }
-
-        override fun afterHookedMethod(param: MethodHookParam) {
-            val filterName = hook.method.declaringClass.name
-            val resultItems = extractFeedItemsFromResult(param.result)
-            if (resultItems != null) {
-                logFeedItems("$filterName OUT", resultItems, feedItemInspector)
-                val keptItems = ArrayList<Any?>()
-                var removed = 0
-                for (item in resultItems) {
-                    if (feedItemInspector.isDefinitelySponsoredFeedItem(item)) {
-                        removed++
-                    } else {
-                        keptItems.add(item)
-                    }
-                }
-                if (removed > 0 && replaceFeedItemsInResult(param, keptItems)) {
-                    Logger.i(TAG, "Removed $removed sponsored feed item(s) from result of ${hook.method.declaringClass.name}.${hook.method.name}")
+            if (removed > 0) {
+                val rebuilt = buildImmutableListLike(chain.args.getOrNull(hook.listArgIndex), keptItems)
+                if (rebuilt != null) {
+                    val newArgs = chain.args.toTypedArray()
+                    newArgs[hook.listArgIndex] = rebuilt
+                    val result = chain.proceed(newArgs)
+                    // Post-hook logic
+                    val finalResult = handleFilterOutput(result, filterName, feedItemInspector)
+                    return@intercept finalResult ?: result
                 }
             }
         }
-    })
+        
+        val result = chain.proceed()
+        val finalResult = handleFilterOutput(result, filterName, feedItemInspector)
+        finalResult ?: result
+    }
     return true
 }
 
+private fun handleFilterOutput(result: Any?, filterName: String, feedItemInspector: FeedItemInspector): Any? {
+    val resultItems = extractFeedItemsFromResult(result)
+    if (resultItems != null) {
+        logFeedItems("$filterName OUT", resultItems, feedItemInspector)
+        val keptItems = ArrayList<Any?>()
+        var removed = 0
+        for (item in resultItems) {
+            if (feedItemInspector.isDefinitelySponsoredFeedItem(item)) {
+                removed++
+            } else {
+                keptItems.add(item)
+            }
+        }
+        if (removed > 0) {
+            val rebuiltResult = result?.let { rebuildFeedResult(it, keptItems) }
+            if (rebuiltResult != null) {
+                Logger.i(TAG, "Removed $removed sponsored feed item(s) from result of $filterName")
+                return rebuiltResult
+            }
+        }
+    }
+    return null
+}
+
 internal fun hookLateFeedListSanitizer(
+    module: XposedModule,
     hook: FeedListSanitizerHook,
     feedItemInspector: FeedItemInspector
 ): Boolean {
     if (!lateFeedMethodsHooked.add(methodHookKey(hook.method))) {
         return false
     }
-    XposedBridge.hookMethod(hook.method, object : XC_MethodHook() {
-        override fun beforeHookedMethod(param: MethodHookParam) {
-            val originalList = param.args.getOrNull(hook.listArgIndex) as? Iterable<*> ?: return
+    module.hook(hook.method).intercept { chain ->
+        val originalList = chain.args.getOrNull(hook.listArgIndex) as? Iterable<*>
+        if (originalList != null) {
             val keptItems = ArrayList<Any?>()
             var removed = 0
 
@@ -1117,64 +1114,63 @@ internal fun hookLateFeedListSanitizer(
                 }
             }
 
-            if (removed <= 0) return
-
-            val rebuilt = buildImmutableListLike(param.args.getOrNull(hook.listArgIndex), keptItems) ?: return
-            param.args[hook.listArgIndex] = rebuilt
-            Logger.i(
-                TAG,
-                "Late-stage removed $removed sponsored feed item(s) before ${hook.method.declaringClass.name}.${hook.method.name}"
-            )
+            if (removed > 0) {
+                val rebuilt = buildImmutableListLike(chain.args.getOrNull(hook.listArgIndex), keptItems)
+                if (rebuilt != null) {
+                    val newArgs = chain.args.toTypedArray()
+                    newArgs[hook.listArgIndex] = rebuilt
+                    Logger.i(
+                        TAG,
+                        "Late-stage removed $removed sponsored feed item(s) before ${hook.method.declaringClass.name}.${hook.method.name}"
+                    )
+                    return@intercept chain.proceed(newArgs)
+                }
+            }
         }
-    })
+        chain.proceed()
+    }
     return true
 }
 
-internal fun hookStoryPoolAdd(method: Method, feedItemInspector: FeedItemInspector) {
-    XposedBridge.hookMethod(method, object : XC_MethodHook() {
-        override fun beforeHookedMethod(param: MethodHookParam) {
-            val item = param.args.getOrNull(0)
-            val blockReason = feedItemInspector.storyPoolBlockReason(item)
-            if (blockReason == null) {
-                if (feedItemInspector.isSponsoredFeedItem(item)) {
-                    logHookHitThrottled("storyPoolBroadAllowed", method, feedItemInspector.describe(item))
-                }
-                return
+internal fun hookStoryPoolAdd(module: XposedModule, method: Method, feedItemInspector: FeedItemInspector) {
+    module.hook(method).intercept { chain ->
+        val item = chain.args.getOrNull(0)
+        val blockReason = feedItemInspector.storyPoolBlockReason(item)
+        if (blockReason == null) {
+            if (feedItemInspector.isSponsoredFeedItem(item)) {
+                logHookHitThrottled("storyPoolBroadAllowed", method, feedItemInspector.describe(item))
             }
-
-            param.result = false
-            logHookHitThrottled(
-                if (blockReason == "strict") "storyPoolStrictBlock" else "storyPoolBroadNetworkBlock",
-                method,
-                feedItemInspector.describe(item)
-            )
+            return@intercept chain.proceed()
         }
-    })
+
+        logHookHitThrottled(
+            if (blockReason == "strict") "storyPoolStrictBlock" else "storyPoolBroadNetworkBlock",
+            method,
+            feedItemInspector.describe(item)
+        )
+        false
+    }
 }
 
-internal fun hookSponsoredPoolAdd(method: Method): Boolean {
+internal fun hookSponsoredPoolAdd(module: XposedModule, method: Method): Boolean {
     if (!sponsoredPoolMethodsHooked.add(methodHookKey(method))) {
         return false
     }
-    XposedBridge.hookMethod(method, object : XC_MethodHook() {
-        override fun beforeHookedMethod(param: MethodHookParam) {
-            param.result = false
-            logHookHitThrottled("sponsoredPoolBlock", method)
-        }
-    })
+    module.hook(method).intercept { chain ->
+        logHookHitThrottled("sponsoredPoolBlock", method)
+        false
+    }
     return true
 }
 
-internal fun hookSponsoredStoryNext(method: Method) {
-    XposedBridge.hookMethod(method, object : XC_MethodHook() {
-        override fun beforeHookedMethod(param: MethodHookParam) {
-            param.result = null
-            Logger.i(TAG, "Blocked sponsored story vending from feed manager")
-        }
-    })
+internal fun hookSponsoredStoryNext(module: XposedModule, method: Method) {
+    module.hook(method).intercept { chain ->
+        Logger.i(TAG, "Blocked sponsored story vending from feed manager")
+        null
+    }
 }
 
-internal fun hookSponsoredStoryListMethods(managerClass: Class<*>) {
+internal fun hookSponsoredStoryListMethods(module: XposedModule, managerClass: Class<*>) {
     var hooked = 0
     managerClass.declaredMethods
         .filter { method ->
@@ -1183,13 +1179,7 @@ internal fun hookSponsoredStoryListMethods(managerClass: Class<*>) {
         }
         .forEach { method ->
             method.isAccessible = true
-            XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    buildEmptyListReturn(method.returnType)?.let { emptyResult ->
-                        param.result = emptyResult
-                    }
-                }
-            })
+            module.hook(method).intercept { chain -> buildEmptyListReturn(method.returnType) ?: chain.proceed() }
             hooked++
         }
     Logger.i(TAG, "Hooked $hooked sponsored story list method(s) on ${managerClass.name}")

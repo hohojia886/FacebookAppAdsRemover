@@ -8,8 +8,8 @@ import android.os.Handler
 import android.os.Message
 import android.os.Messenger
 import android.view.View
-import de.robv.android.xposed.XC_MethodHook
-import de.robv.android.xposed.XposedBridge
+import io.github.libxposed.api.XposedModule
+import io.github.libxposed.api.XposedInterface
 import org.json.JSONArray
 import org.json.JSONObject
 import org.luckypray.dexkit.result.ClassData
@@ -61,7 +61,7 @@ internal fun isGameAdInterestingActivity(activity: Activity): Boolean {
         activity.intent?.component?.className?.hasGameAdSignal() == true
 }
 
-internal fun tryHookGameAdDiagnosticClass(clazz: Class<*>) {
+internal fun tryHookGameAdDiagnosticClass(module: XposedModule, clazz: Class<*>) {
     if (!ENABLE_GAME_AD_DIAGNOSTICS) return
     val className = clazz.name
     if (!isGameAdDiagnosticClassName(className) || !gameAdDiagnosticClassesHooked.add(className)) return
@@ -75,24 +75,25 @@ internal fun tryHookGameAdDiagnosticClass(clazz: Class<*>) {
         .forEach { method ->
             runCatching {
                 method.isAccessible = true
-                XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        if (!shouldLogGameAdDiagnosticCall(method, param.args)) return
+                module.hook(method).intercept { chain ->
+                    if (shouldLogGameAdDiagnosticCall(method, chain.args.toTypedArray())) {
                         markGameAdDiagnosticFlow("dynamic ${method.declaringClass.name}.${method.name}")
                         logGameAdDiagnostic(
                             "dynamic.before",
-                            "${methodSignature(method)} this=${formatDiagValue(param.thisObject)} args=${formatDiagArgs(param.args)}"
+                            "${methodSignature(method)} this=${formatDiagValue(chain.thisObject)} args=${formatDiagArgs(chain.args.toTypedArray())}"
                         )
                     }
-
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        if (!shouldLogGameAdDiagnosticCall(method, param.args) && !isRecentGameAdDiagnosticFlow()) return
+                    
+                    val result = chain.proceed()
+                    
+                    if (shouldLogGameAdDiagnosticCall(method, chain.args.toTypedArray()) || isRecentGameAdDiagnosticFlow()) {
                         logGameAdDiagnostic(
                             "dynamic.after",
-                            "${methodSignature(method)} result=${formatDiagValue(param.result)} throwable=${formatDiagThrowable(param.throwable)}"
+                            "${methodSignature(method)} result=${formatDiagValue(result)} throwable=none"
                         )
                     }
-                })
+                    result
+                }
                 hooked++
             }.onFailure {
                 Logger.w(TAG, "Failed to hook game ad diagnostic method ${clazz.name}.${method.name}", it)
@@ -185,7 +186,7 @@ internal fun logHookHitThrottled(hookName: String, method: Method, detail: Strin
     }
 }
 
-internal fun hookMessengerSendDiagnostics() {
+internal fun hookMessengerSendDiagnostics(module: XposedModule) {
     val sendMethods = (Messenger::class.java.declaredMethods + Messenger::class.java.methods)
         .filter { method ->
             method.name == "send" &&
@@ -196,30 +197,30 @@ internal fun hookMessengerSendDiagnostics() {
 
     sendMethods.forEach { method ->
         method.isAccessible = true
-        XposedBridge.hookMethod(method, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                val message = param.args.getOrNull(0) as? Message ?: return
-                if (!shouldLogGameAdMessage(message)) return
+        module.hook(method).intercept { chain ->
+            val message = chain.args.getOrNull(0) as? Message
+            if (message != null && shouldLogGameAdMessage(message)) {
                 markGameAdDiagnosticFlow("messenger.send")
                 logGameAdDiagnostic(
                     "messenger.send.before",
-                    "${methodSignature(method)} this=${formatDiagValue(param.thisObject)} message=${formatDiagValue(message)}"
+                    "${methodSignature(method)} this=${formatDiagValue(chain.thisObject)} message=${formatDiagValue(message)}"
                 )
             }
-
-            override fun afterHookedMethod(param: MethodHookParam) {
-                val message = param.args.getOrNull(0) as? Message ?: return
-                if (!shouldLogGameAdMessage(message)) return
+            
+            val result = chain.proceed()
+            
+            if (message != null && shouldLogGameAdMessage(message)) {
                 logGameAdDiagnostic(
                     "messenger.send.after",
-                    "${methodSignature(method)} result=${formatDiagValue(param.result)} throwable=${formatDiagThrowable(param.throwable)}"
+                    "${methodSignature(method)} result=${formatDiagValue(result)} throwable=none"
                 )
             }
-        })
+            result
+        }
     }
 }
 
-internal fun hookHandlerMessageDiagnostics(classLoader: ClassLoader) {
+internal fun hookHandlerMessageDiagnostics(module: XposedModule, classLoader: ClassLoader) {
     if (ENABLE_BROAD_HANDLER_GAME_AD_DIAGNOSTICS) {
         (Handler::class.java.declaredMethods + Handler::class.java.methods)
             .filter { method ->
@@ -230,32 +231,29 @@ internal fun hookHandlerMessageDiagnostics(classLoader: ClassLoader) {
             .distinctBy { methodSignature(it) }
             .forEach { method ->
                 method.isAccessible = true
-                XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        val message = param.args.getOrNull(0) as? Message ?: return
-                        val handlerName = param.thisObject?.javaClass?.name.orEmpty()
-                        if (!shouldLogGameAdMessage(message) && !handlerName.contains("C95084edO") && !handlerName.contains("HandlerC95084edO")) {
-                            return
-                        }
+                module.hook(method).intercept { chain ->
+                    val message = chain.args.getOrNull(0) as? Message
+                    val handlerName = chain.thisObject?.javaClass?.name.orEmpty()
+                    val interesting = message != null && (shouldLogGameAdMessage(message) || handlerName.contains("C95084edO") || handlerName.contains("HandlerC95084edO"))
+                    
+                    if (interesting) {
                         markGameAdDiagnosticFlow("handler.dispatch $handlerName")
                         logGameAdDiagnostic(
                             "handler.dispatch.before",
                             "handler=$handlerName ${methodSignature(method)} message=${formatDiagValue(message)}"
                         )
                     }
-
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        val message = param.args.getOrNull(0) as? Message ?: return
-                        val handlerName = param.thisObject?.javaClass?.name.orEmpty()
-                        if (!shouldLogGameAdMessage(message) && !handlerName.contains("C95084edO") && !handlerName.contains("HandlerC95084edO")) {
-                            return
-                        }
+                    
+                    val result = chain.proceed()
+                    
+                    if (interesting) {
                         logGameAdDiagnostic(
                             "handler.dispatch.after",
-                            "handler=$handlerName result=${formatDiagValue(param.result)} throwable=${formatDiagThrowable(param.throwable)}"
+                            "handler=$handlerName result=${formatDiagValue(result)} throwable=none"
                         )
                     }
-                })
+                    result
+                }
             }
     }
 
@@ -270,28 +268,27 @@ internal fun hookHandlerMessageDiagnostics(classLoader: ClassLoader) {
             .distinctBy { methodSignature(it) }
             .forEach { method ->
                 method.isAccessible = true
-                XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        val message = param.args.getOrNull(0) as? Message ?: return
-                        markGameAdDiagnosticFlow("quicksilver.handleMessage")
-                        logGameAdDiagnostic(
-                            "quicksilver.handleMessage.before",
-                            "${methodSignature(method)} this=${formatDiagValue(param.thisObject)} message=${formatDiagValue(message)}"
-                        )
-                    }
-
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        logGameAdDiagnostic(
-                            "quicksilver.handleMessage.after",
-                            "${methodSignature(method)} result=${formatDiagValue(param.result)} throwable=${formatDiagThrowable(param.throwable)}"
-                        )
-                    }
-                })
+                module.hook(method).intercept { chain ->
+                    val message = chain.args.getOrNull(0) as? Message
+                    markGameAdDiagnosticFlow("quicksilver.handleMessage")
+                    logGameAdDiagnostic(
+                        "quicksilver.handleMessage.before",
+                        "${methodSignature(method)} this=${formatDiagValue(chain.thisObject)} message=${formatDiagValue(message)}"
+                    )
+                    
+                    val result = chain.proceed()
+                    
+                    logGameAdDiagnostic(
+                        "quicksilver.handleMessage.after",
+                        "${methodSignature(method)} result=${formatDiagValue(result)} throwable=none"
+                    )
+                    result
+                }
             }
     }
 }
 
-internal fun hookActivityResultDiagnostics() {
+internal fun hookActivityResultDiagnostics(module: XposedModule) {
     (Activity::class.java.declaredMethods + Activity::class.java.methods)
         .filter { method ->
             (method.name == "setResult" && method.parameterTypes.firstOrNull() == Int::class.javaPrimitiveType) ||
@@ -305,29 +302,29 @@ internal fun hookActivityResultDiagnostics() {
         .distinctBy { methodSignature(it) }
         .forEach { method ->
             method.isAccessible = true
-            XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    val activity = param.thisObject as? Activity ?: return
-                    if (!shouldLogGameAdActivityDiagnostic(activity, param.args)) return
+            module.hook(method).intercept { chain ->
+                val activity = chain.thisObject as? Activity
+                if (activity != null && shouldLogGameAdActivityDiagnostic(activity, chain.args.toTypedArray())) {
                     markGameAdDiagnosticFlow("activity.${method.name} ${activity.javaClass.name}")
                     logGameAdDiagnostic(
                         "activity.${method.name}.before",
-                        "${activity.javaClass.name} ${methodSignature(method)} args=${formatDiagArgs(param.args)} intent=${formatDiagValue(activity.intent)}"
+                        "${activity.javaClass.name} ${methodSignature(method)} args=${formatDiagArgs(chain.args.toTypedArray())} intent=${formatDiagValue(activity.intent)}"
                     )
                     if (method.name == "finish") {
                         dumpAudienceNetworkActivityState(activity, "activity.finish.before")
                     }
                 }
-
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    val activity = param.thisObject as? Activity ?: return
-                    if (!shouldLogGameAdActivityDiagnostic(activity, param.args)) return
+                
+                val result = chain.proceed()
+                
+                if (activity != null && shouldLogGameAdActivityDiagnostic(activity, chain.args.toTypedArray())) {
                     logGameAdDiagnostic(
                         "activity.${method.name}.after",
-                        "${activity.javaClass.name} result=${formatDiagValue(param.result)} throwable=${formatDiagThrowable(param.throwable)}"
+                        "${activity.javaClass.name} result=${formatDiagValue(result)} throwable=none"
                     )
                 }
-            })
+                result
+            }
         }
 
     (Instrumentation::class.java.declaredMethods + Instrumentation::class.java.methods)
@@ -342,30 +339,30 @@ internal fun hookActivityResultDiagnostics() {
         .distinctBy { methodSignature(it) }
         .forEach { method ->
             method.isAccessible = true
-            XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    val activity = param.args.getOrNull(0) as? Activity ?: return
-                    if (!shouldLogGameAdActivityDiagnostic(activity, param.args)) return
+            module.hook(method).intercept { chain ->
+                val activity = chain.args.getOrNull(0) as? Activity
+                if (activity != null && shouldLogGameAdActivityDiagnostic(activity, chain.args.toTypedArray())) {
                     markGameAdDiagnosticFlow("instrumentation.activityResult ${activity.javaClass.name}")
                     logGameAdDiagnostic(
                         "instrumentation.activityResult.before",
-                        "${methodSignature(method)} args=${formatDiagArgs(param.args)}"
+                        "${methodSignature(method)} args=${formatDiagArgs(chain.args.toTypedArray())}"
                     )
                 }
-
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    val activity = param.args.getOrNull(0) as? Activity ?: return
-                    if (!shouldLogGameAdActivityDiagnostic(activity, param.args)) return
+                
+                val result = chain.proceed()
+                
+                if (activity != null && shouldLogGameAdActivityDiagnostic(activity, chain.args.toTypedArray())) {
                     logGameAdDiagnostic(
                         "instrumentation.activityResult.after",
-                        "${methodSignature(method)} result=${formatDiagValue(param.result)} throwable=${formatDiagThrowable(param.throwable)}"
+                        "${methodSignature(method)} result=${formatDiagValue(result)} throwable=none"
                     )
                 }
-            })
+                result
+            }
         }
 }
 
-internal fun hookDynamicGameAdClassDiagnostics(classLoader: ClassLoader) {
+internal fun hookDynamicGameAdClassDiagnostics(module: XposedModule, classLoader: ClassLoader) {
     if (!gameAdDynamicDiagnosticsInstalled.compareAndSet(0, 1)) return
 
     listOf(
@@ -374,7 +371,7 @@ internal fun hookDynamicGameAdClassDiagnostics(classLoader: ClassLoader) {
         "p000X.HandlerC95084edO",
         "com.facebook.quicksilver.webviewprocess.QuicksilverSeparateProcessAdsLoader"
     ).forEach { className ->
-        runCatching { tryHookGameAdDiagnosticClass(classLoader.loadClass(className)) }
+        runCatching { tryHookGameAdDiagnosticClass(module, classLoader.loadClass(className)) }
     }
 
     (ClassLoader::class.java.declaredMethods + ClassLoader::class.java.methods)
@@ -386,15 +383,18 @@ internal fun hookDynamicGameAdClassDiagnostics(classLoader: ClassLoader) {
         .distinctBy { methodSignature(it) }
         .forEach { method ->
             method.isAccessible = true
-            XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    val className = param.args.getOrNull(0) as? String ?: return
-                    val clazz = param.result as? Class<*> ?: return
-                    if (!isGameAdDiagnosticClassName(className) && !isGameAdDiagnosticClassName(clazz.name)) return
-                    logGameAdDiagnosticClass(clazz)
-                    tryHookGameAdDiagnosticClass(clazz)
+            module.hook(method).intercept { chain ->
+                val result = chain.proceed()
+                val className = chain.args.getOrNull(0) as? String
+                val clazz = result as? Class<*>
+                if (className != null && clazz != null) {
+                    if (isGameAdDiagnosticClassName(className) || isGameAdDiagnosticClassName(clazz.name)) {
+                        logGameAdDiagnosticClass(clazz)
+                        tryHookGameAdDiagnosticClass(module, clazz)
+                    }
                 }
-            })
+                result
+            }
         }
 }
 

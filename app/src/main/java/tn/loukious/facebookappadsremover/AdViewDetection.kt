@@ -5,8 +5,8 @@ import android.content.ContextWrapper
 import android.view.View
 import android.view.ViewGroup
 import android.widget.TextView
-import de.robv.android.xposed.XC_MethodHook
-import de.robv.android.xposed.XposedBridge
+import io.github.libxposed.api.XposedModule
+import io.github.libxposed.api.XposedInterface
 import org.luckypray.dexkit.DexKitBridge
 import java.lang.reflect.Method
 import java.lang.reflect.Modifier
@@ -553,7 +553,7 @@ internal fun isSafeFeedMarkerCardCandidate(view: View, rootWidth: Int, rootHeigh
     val bottomOnScreen = topOnScreen + height
 
     if (topOnScreen < (rootHeight * 0.04f).toInt()) return false
-    if (bottomOnScreen > (rootHeight * 0.96f).toInt()) return false
+    if (bottomOnScreen > (rootHeight * 0.98f).toInt()) return false
 
     return true
 }
@@ -588,32 +588,26 @@ internal fun contextActivityForView(view: View): Activity? {
     return null
 }
 
-internal fun hookIndicatorPillAdEligibility(method: Method) {
-    XposedBridge.hookMethod(method, object : XC_MethodHook() {
-        override fun beforeHookedMethod(param: MethodHookParam) {
-            val pluginSlot = param.args.getOrNull(2)?.toString() ?: "unknown"
-            logHookHitThrottled("indicatorPill", method, "slot=$pluginSlot")
-            param.result = false
-        }
-    })
+internal fun hookIndicatorPillAdEligibility(module: XposedModule, method: Method) {
+    module.hook(method).intercept { chain ->
+        val pluginSlot = chain.args.getOrNull(2)?.toString() ?: "unknown"
+        logHookHitThrottled("indicatorPill", method, "slot=$pluginSlot")
+        false
+    }
 }
 
-internal fun hookInstreamBannerEligibility(method: Method) {
-    XposedBridge.hookMethod(method, object : XC_MethodHook() {
-        override fun beforeHookedMethod(param: MethodHookParam) {
-            logHookHitThrottled("bannerState", method)
-            param.result = false
-        }
-    })
+internal fun hookInstreamBannerEligibility(module: XposedModule, method: Method) {
+    module.hook(method).intercept { chain ->
+        logHookHitThrottled("bannerState", method)
+        false
+    }
 }
 
-internal fun hookReelsBannerRender(method: Method) {
-    XposedBridge.hookMethod(method, object : XC_MethodHook() {
-        override fun beforeHookedMethod(param: MethodHookParam) {
-            logHookHitThrottled("reelsBannerRender", method)
-            param.result = null
-        }
-    })
+internal fun hookReelsBannerRender(module: XposedModule, method: Method) {
+    module.hook(method).intercept { chain ->
+        logHookHitThrottled("reelsBannerRender", method)
+        null
+    }
 }
 
 internal fun resolveIndicatorPillAdEligibilityMethod(

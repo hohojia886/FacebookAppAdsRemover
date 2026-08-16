@@ -4,8 +4,8 @@ import android.app.Activity
 import android.content.ContextWrapper
 import android.content.Intent
 import android.os.Bundle
-import de.robv.android.xposed.XC_MethodHook
-import de.robv.android.xposed.XposedBridge
+import io.github.libxposed.api.XposedModule
+import io.github.libxposed.api.XposedInterface
 import org.json.JSONObject
 import org.luckypray.dexkit.DexKitBridge
 import org.luckypray.dexkit.result.ClassData
@@ -73,113 +73,104 @@ internal val GAME_AD_METHOD_TAGS = listOf(
     "Invalid JSON content received by onShowAdAsync: "
 )
 
-internal fun hookGameAdRequest(method: Method) {
-    XposedBridge.hookMethod(method, object : XC_MethodHook() {
-        override fun beforeHookedMethod(param: MethodHookParam) {
-            val payload = param.args.getOrNull(0) ?: return
-            val messageType = inferGameAdMessageType(method, payload)
-            markGameAdDiagnosticFlow("request ${method.declaringClass.name}.${method.name}")
-            logGameAdDiagnostic(
-                "request.before",
-                "${methodSignature(method)} type=$messageType this=${formatDiagValue(param.thisObject)} args=${formatDiagArgs(param.args)}"
-            )
-            rememberGameAdPayload(param.thisObject, payload, messageType)
-            if (!ENABLE_GAME_AD_AUTOFIX) return
-            if (rejectUnavailableGameAdPayloadIfNeeded(param.thisObject, payload, messageType, "request ${method.declaringClass.name}.${method.name}")) {
-                param.result = null
-                return
-            }
-            if (!shouldAutofixGameAdMessage(messageType)) return
-
-            if (resolveGameAdPayload(param.thisObject, payload, messageType)) {
-                dispatchPostResolveGameAdSignals(param.thisObject, payload, messageType)
-                param.result = null
-                Logger.i(
-                    TAG,
-                    "Resolved game ad request as success in ${method.declaringClass.name}.${method.name}"
-                )
-            } else if (rejectGameAdPayload(param.thisObject, payload)) {
-                param.result = null
-                Logger.i(
-                    TAG,
-                    "Rejected game ad request in ${method.declaringClass.name}.${method.name}"
-                )
-            } else {
-                Logger.w(
-                    TAG,
-                    "Unable to resolve or reject game ad request ${method.declaringClass.name}.${method.name}"
-                )
-            }
+internal fun hookGameAdRequest(module: XposedModule, method: Method) {
+    module.hook(method).intercept { chain ->
+        val payload = chain.args.getOrNull(0)
+        if (payload == null) return@intercept chain.proceed()
+        
+        val messageType = inferGameAdMessageType(method, payload)
+        markGameAdDiagnosticFlow("request ${method.declaringClass.name}.${method.name}")
+        logGameAdDiagnostic(
+            "request.before",
+            "${methodSignature(method)} type=$messageType this=${formatDiagValue(chain.thisObject)} args=${formatDiagArgs(chain.args.toTypedArray())}"
+        )
+        rememberGameAdPayload(chain.thisObject, payload, messageType)
+        if (!ENABLE_GAME_AD_AUTOFIX) return@intercept chain.proceed()
+        if (rejectUnavailableGameAdPayloadIfNeeded(chain.thisObject, payload, messageType, "request ${method.declaringClass.name}.${method.name}")) {
+            return@intercept null
         }
+        if (!shouldAutofixGameAdMessage(messageType)) return@intercept chain.proceed()
 
-        override fun afterHookedMethod(param: MethodHookParam) {
-            val payload = param.args.getOrNull(0) ?: return
-            val messageType = inferGameAdMessageType(method, payload)
-            logGameAdDiagnostic(
-                "request.after",
-                "${methodSignature(method)} type=$messageType result=${formatDiagValue(param.result)} throwable=${formatDiagThrowable(param.throwable)}"
+        if (resolveGameAdPayload(chain.thisObject, payload, messageType)) {
+            dispatchPostResolveGameAdSignals(chain.thisObject, payload, messageType)
+            Logger.i(
+                TAG,
+                "Resolved game ad request as success in ${method.declaringClass.name}.${method.name}"
+            )
+            return@intercept null
+        } else if (rejectGameAdPayload(chain.thisObject, payload)) {
+            Logger.i(
+                TAG,
+                "Rejected game ad request in ${method.declaringClass.name}.${method.name}"
+            )
+            return@intercept null
+        } else {
+            Logger.w(
+                TAG,
+                "Unable to resolve or reject game ad request ${method.declaringClass.name}.${method.name}"
             )
         }
-    })
+        
+        val result = chain.proceed()
+        logGameAdDiagnostic(
+            "request.after",
+            "${methodSignature(method)} type=$messageType result=${formatDiagValue(result)} throwable=none"
+        )
+        result
+    }
 }
 
-internal fun hookGameAdBridge(method: Method) {
-    XposedBridge.hookMethod(method, object : XC_MethodHook() {
-        override fun beforeHookedMethod(param: MethodHookParam) {
-            val rawMessage = param.args.getOrNull(0) as? String ?: return
-            val payload = runCatching { JSONObject(rawMessage) }.getOrNull() ?: return
-            val messageType = payload.optString("type")
-            if (messageType !in GAME_AD_MESSAGE_TYPES) return
+internal fun hookGameAdBridge(module: XposedModule, method: Method) {
+    module.hook(method).intercept { chain ->
+        val rawMessage = chain.args.getOrNull(0) as? String
+        if (rawMessage == null) return@intercept chain.proceed()
+        
+        val payload = runCatching { JSONObject(rawMessage) }.getOrNull() ?: return@intercept chain.proceed()
+        val messageType = payload.optString("type")
+        if (messageType !in GAME_AD_MESSAGE_TYPES) return@intercept chain.proceed()
 
-            markGameAdDiagnosticFlow("bridge ${method.declaringClass.name}.${method.name}")
-            logGameAdDiagnostic(
-                "bridge.before",
-                "${methodSignature(method)} type=$messageType args=${formatDiagArgs(param.args)}"
-            )
-            rememberGameAdPayload(param.thisObject, payload, messageType)
-            if (!ENABLE_GAME_AD_AUTOFIX) return
-            if (rejectUnavailableGameAdPayloadIfNeeded(param.thisObject, payload, messageType, "bridge ${method.declaringClass.name}.${method.name}")) {
-                param.result = null
-                return
-            }
-            if (!shouldAutofixGameAdMessage(messageType)) return
-
-            if (resolveGameAdPayload(param.thisObject, payload, messageType)) {
-                dispatchPostResolveGameAdSignals(param.thisObject, payload, messageType)
-                param.result = null
-                Logger.i(
-                    TAG,
-                    "Resolved game ad bridge message type=$messageType in ${method.declaringClass.name}.${method.name}"
-                )
-            } else if (rejectGameAdPayload(param.thisObject, payload)) {
-                param.result = null
-                Logger.i(
-                    TAG,
-                    "Rejected game ad bridge message type=$messageType in ${method.declaringClass.name}.${method.name}"
-                )
-            } else {
-                Logger.w(
-                    TAG,
-                    "Unable to resolve or reject game ad bridge message type=$messageType in ${method.declaringClass.name}.${method.name}"
-                )
-            }
+        markGameAdDiagnosticFlow("bridge ${method.declaringClass.name}.${method.name}")
+        logGameAdDiagnostic(
+            "bridge.before",
+            "${methodSignature(method)} type=$messageType args=${formatDiagArgs(chain.args.toTypedArray())}"
+        )
+        rememberGameAdPayload(chain.thisObject, payload, messageType)
+        if (!ENABLE_GAME_AD_AUTOFIX) return@intercept chain.proceed()
+        if (rejectUnavailableGameAdPayloadIfNeeded(chain.thisObject, payload, messageType, "bridge ${method.declaringClass.name}.${method.name}")) {
+            return@intercept null
         }
+        if (!shouldAutofixGameAdMessage(messageType)) return@intercept chain.proceed()
 
-        override fun afterHookedMethod(param: MethodHookParam) {
-            val rawMessage = param.args.getOrNull(0) as? String ?: return
-            val payload = runCatching { JSONObject(rawMessage) }.getOrNull() ?: return
-            val messageType = payload.optString("type")
-            if (messageType !in GAME_AD_MESSAGE_TYPES) return
-
-            logGameAdDiagnostic(
-                "bridge.after",
-                "${methodSignature(method)} type=$messageType result=${formatDiagValue(param.result)} throwable=${formatDiagThrowable(param.throwable)}"
+        if (resolveGameAdPayload(chain.thisObject, payload, messageType)) {
+            dispatchPostResolveGameAdSignals(chain.thisObject, payload, messageType)
+            Logger.i(
+                TAG,
+                "Resolved game ad bridge message type=$messageType in ${method.declaringClass.name}.${method.name}"
+            )
+            return@intercept null
+        } else if (rejectGameAdPayload(chain.thisObject, payload)) {
+            Logger.i(
+                TAG,
+                "Rejected game ad bridge message type=$messageType in ${method.declaringClass.name}.${method.name}"
+            )
+            return@intercept null
+        } else {
+            Logger.w(
+                TAG,
+                "Unable to resolve or reject game ad bridge message type=$messageType in ${method.declaringClass.name}.${method.name}"
             )
         }
-    })
+        
+        val result = chain.proceed()
+        logGameAdDiagnostic(
+            "bridge.after",
+            "${methodSignature(method)} type=$messageType result=${formatDiagValue(result)} throwable=none"
+        )
+        result
+    }
 }
 
-internal fun hookGameAdResultMethods(bridgeClass: Class<*>) {
+internal fun hookGameAdResultMethods(module: XposedModule, bridgeClass: Class<*>) {
     if (!gameAdResultHooksInstalled.compareAndSet(0, 1)) return
 
     val resolveMethod = resolveGameAdResolveMethod(bridgeClass)
@@ -188,143 +179,149 @@ internal fun hookGameAdResultMethods(bridgeClass: Class<*>) {
     var hooked = 0
 
     resolveMethod?.let { method ->
-        XposedBridge.hookMethod(method, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                val promiseId = param.args.getOrNull(0) as? String ?: return
-                val snapshot = gameAdPromiseSnapshots[promiseId] ?: return
-                markGameAdDiagnosticFlow("resolve ${method.declaringClass.name}.${method.name}")
-                logGameAdDiagnostic(
-                    "resolve.before",
-                    "${methodSignature(method)} promise=$promiseId snapshotType=${snapshot.messageType} args=${formatDiagArgs(param.args)}"
-                )
-                if (snapshot.messageType !in GAME_AD_MESSAGE_TYPES) return
-                if (!ENABLE_GAME_AD_AUTOFIX) return
-                if (!shouldAutofixGameAdMessage(snapshot.messageType)) return
-
-                val original = param.args.getOrNull(1)
-                param.args[1] = forceGameAdSuccessResult(
-                    promiseId = promiseId,
-                    original = original,
-                    payload = snapshot.payload,
-                    messageType = snapshot.messageType
-                )
-                Logger.i(TAG, "Forced successful game ad resolve promise=$promiseId type=${snapshot.messageType}")
+        module.hook(method).intercept { chain ->
+            val promiseId = chain.args.getOrNull(0) as? String
+            if (promiseId != null) {
+                val snapshot = gameAdPromiseSnapshots[promiseId]
+                if (snapshot != null) {
+                    markGameAdDiagnosticFlow("resolve ${method.declaringClass.name}.${method.name}")
+                    logGameAdDiagnostic(
+                        "resolve.before",
+                        "${methodSignature(method)} promise=$promiseId snapshotType=${snapshot.messageType} args=${formatDiagArgs(chain.args.toTypedArray())}"
+                    )
+                    if (snapshot.messageType in GAME_AD_MESSAGE_TYPES && ENABLE_GAME_AD_AUTOFIX && shouldAutofixGameAdMessage(snapshot.messageType)) {
+                        val original = chain.args.getOrNull(1)
+                        val success = forceGameAdSuccessResult(
+                            promiseId = promiseId,
+                            original = original,
+                            payload = snapshot.payload,
+                            messageType = snapshot.messageType
+                        )
+                        val newArgs = chain.args.toTypedArray()
+                        newArgs[1] = success
+                        Logger.i(TAG, "Forced successful game ad resolve promise=$promiseId type=${snapshot.messageType}")
+                        val res = chain.proceed(newArgs)
+                        logGameAdDiagnostic(
+                            "resolve.after",
+                            "${methodSignature(method)} promise=$promiseId snapshotType=${snapshot.messageType} result=${formatDiagValue(res)} throwable=none"
+                        )
+                        return@intercept res
+                    }
+                }
             }
-
-            override fun afterHookedMethod(param: MethodHookParam) {
-                val promiseId = param.args.getOrNull(0) as? String ?: return
-                val snapshot = gameAdPromiseSnapshots[promiseId] ?: return
-                logGameAdDiagnostic(
-                    "resolve.after",
-                    "${methodSignature(method)} promise=$promiseId snapshotType=${snapshot.messageType} result=${formatDiagValue(param.result)} throwable=${formatDiagThrowable(param.throwable)}"
-                )
-            }
-        })
+            chain.proceed()
+        }
         hooked++
     }
 
     if (rejectMethod != null && resolveMethod != null) {
-        XposedBridge.hookMethod(rejectMethod, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                val promiseId = param.args.getOrNull(0) as? String ?: return
-                val reason = param.args.drop(1).joinToString(" ") { it?.toString().orEmpty() }
+        module.hook(rejectMethod).intercept { chain ->
+            val promiseId = chain.args.getOrNull(0) as? String
+            if (promiseId != null) {
+                val reason = chain.args.drop(1).joinToString(" ") { it?.toString().orEmpty() }
                 if (gameAdPromiseSnapshots.containsKey(promiseId) || isRecentGameAdDiagnosticFlow() || reason.hasGameAdSignal()) {
                     markGameAdDiagnosticFlow("reject ${rejectMethod.declaringClass.name}.${rejectMethod.name}")
                     logGameAdDiagnostic(
                         "reject.before",
-                        "${methodSignature(rejectMethod)} promise=$promiseId snapshotType=${gameAdPromiseSnapshots[promiseId]?.messageType} args=${formatDiagArgs(param.args)}"
+                        "${methodSignature(rejectMethod)} promise=$promiseId snapshotType=${gameAdPromiseSnapshots[promiseId]?.messageType} args=${formatDiagArgs(chain.args.toTypedArray())}"
                     )
                 }
-                if (!ENABLE_GAME_AD_AUTOFIX) return
-                if (!shouldConvertGameAdRejectToSuccess(promiseId, reason)) return
-
-                val snapshot = gameAdPromiseSnapshots[promiseId]
-                val success = forceGameAdSuccessResult(
-                    promiseId = promiseId,
-                    original = null,
-                    payload = snapshot?.payload,
-                    messageType = snapshot?.messageType ?: gameAdPromiseTypeFromReason(reason)
-                )
-                runCatching {
-                    XposedBridge.invokeOriginalMethod(resolveMethod, param.thisObject, arrayOf(promiseId, success))
-                    param.result = null
-                    Logger.i(
-                        TAG,
-                        "Converted game ad reject to success promise=$promiseId type=${snapshot?.messageType} reason=$reason"
+                if (ENABLE_GAME_AD_AUTOFIX && shouldConvertGameAdRejectToSuccess(promiseId, reason)) {
+                    val snapshot = gameAdPromiseSnapshots[promiseId]
+                    val success = forceGameAdSuccessResult(
+                        promiseId = promiseId,
+                        original = null,
+                        payload = snapshot?.payload,
+                        messageType = snapshot?.messageType ?: gameAdPromiseTypeFromReason(reason)
                     )
-                }.onFailure {
-                    Logger.w(TAG, "Failed to convert game ad reject to success promise=$promiseId", it)
+                    runCatching {
+                        resolveMethod.invoke(chain.thisObject, promiseId, success)
+                        Logger.i(
+                            TAG,
+                            "Converted game ad reject to success promise=$promiseId type=${snapshot?.messageType} reason=$reason"
+                        )
+                        return@intercept null
+                    }.onFailure {
+                        Logger.w(TAG, "Failed to convert game ad reject to success promise=$promiseId", it)
+                    }
                 }
             }
-
-            override fun afterHookedMethod(param: MethodHookParam) {
-                val promiseId = param.args.getOrNull(0) as? String ?: return
-                val reason = param.args.drop(1).joinToString(" ") { it?.toString().orEmpty() }
-                if (gameAdPromiseSnapshots.containsKey(promiseId) || isRecentGameAdDiagnosticFlow() || reason.hasGameAdSignal()) {
+            
+            val result = chain.proceed()
+            val promiseIdAfter = chain.args.getOrNull(0) as? String
+            if (promiseIdAfter != null) {
+                val reason = chain.args.drop(1).joinToString(" ") { it?.toString().orEmpty() }
+                if (gameAdPromiseSnapshots.containsKey(promiseIdAfter) || isRecentGameAdDiagnosticFlow() || reason.hasGameAdSignal()) {
                     logGameAdDiagnostic(
                         "reject.after",
-                        "${methodSignature(rejectMethod)} promise=$promiseId result=${formatDiagValue(param.result)} throwable=${formatDiagThrowable(param.throwable)}"
+                        "${methodSignature(rejectMethod)} promise=$promiseIdAfter result=${formatDiagValue(result)} throwable=none"
                     )
                 }
             }
-        })
+            result
+        }
         hooked++
     }
 
     if (bridgeRejectMethod != null && resolveMethod != null && bridgeRejectMethod != rejectMethod) {
-        XposedBridge.hookMethod(bridgeRejectMethod, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                val payload = param.args.getOrNull(2) as? JSONObject ?: return
-                val promiseId = extractPromiseId(payload) ?: return
-                val reason = param.args.take(2).joinToString(" ") { it?.toString().orEmpty() }
-                if (gameAdPromiseSnapshots.containsKey(promiseId) || isRecentGameAdDiagnosticFlow() || reason.hasGameAdSignal()) {
-                    markGameAdDiagnosticFlow("bridgeReject ${bridgeRejectMethod.declaringClass.name}.${bridgeRejectMethod.name}")
-                    logGameAdDiagnostic(
-                        "bridgeReject.before",
-                        "${methodSignature(bridgeRejectMethod)} promise=$promiseId snapshotType=${gameAdPromiseSnapshots[promiseId]?.messageType} args=${formatDiagArgs(param.args)}"
-                    )
-                }
-                if (!ENABLE_GAME_AD_AUTOFIX) return
-                if (!shouldConvertGameAdRejectToSuccess(promiseId, reason)) return
-
-                val snapshot = gameAdPromiseSnapshots[promiseId]
-                val success = forceGameAdSuccessResult(
-                    promiseId = promiseId,
-                    original = null,
-                    payload = snapshot?.payload ?: payload,
-                    messageType = snapshot?.messageType ?: gameAdPromiseTypeFromReason(reason)
-                )
-                runCatching {
-                    XposedBridge.invokeOriginalMethod(resolveMethod, param.thisObject, arrayOf(promiseId, success))
-                    param.result = null
-                    Logger.i(
-                        TAG,
-                        "Converted game ad bridge reject to success promise=$promiseId type=${snapshot?.messageType} reason=$reason"
-                    )
-                }.onFailure {
-                    Logger.w(TAG, "Failed to convert game ad bridge reject to success promise=$promiseId", it)
-                }
-            }
-
-            override fun afterHookedMethod(param: MethodHookParam) {
-                val payload = param.args.getOrNull(2) as? JSONObject ?: return
-                val promiseId = extractPromiseId(payload) ?: return
-                val reason = param.args.take(2).joinToString(" ") { it?.toString().orEmpty() }
-                if (gameAdPromiseSnapshots.containsKey(promiseId) || isRecentGameAdDiagnosticFlow() || reason.hasGameAdSignal()) {
-                    logGameAdDiagnostic(
-                        "bridgeReject.after",
-                        "${methodSignature(bridgeRejectMethod)} promise=$promiseId result=${formatDiagValue(param.result)} throwable=${formatDiagThrowable(param.throwable)}"
-                    )
+        module.hook(bridgeRejectMethod).intercept { chain ->
+            val payload = chain.args.getOrNull(2) as? JSONObject
+            if (payload != null) {
+                val promiseId = extractPromiseId(payload)
+                if (promiseId != null) {
+                    val reason = chain.args.take(2).joinToString(" ") { it?.toString().orEmpty() }
+                    if (gameAdPromiseSnapshots.containsKey(promiseId) || isRecentGameAdDiagnosticFlow() || reason.hasGameAdSignal()) {
+                        markGameAdDiagnosticFlow("bridgeReject ${bridgeRejectMethod.declaringClass.name}.${bridgeRejectMethod.name}")
+                        logGameAdDiagnostic(
+                            "bridgeReject.before",
+                            "${methodSignature(bridgeRejectMethod)} promise=$promiseId snapshotType=${gameAdPromiseSnapshots[promiseId]?.messageType} args=${formatDiagArgs(chain.args.toTypedArray())}"
+                        )
+                    }
+                    if (ENABLE_GAME_AD_AUTOFIX && shouldConvertGameAdRejectToSuccess(promiseId, reason)) {
+                        val snapshot = gameAdPromiseSnapshots[promiseId]
+                        val success = forceGameAdSuccessResult(
+                            promiseId = promiseId,
+                            original = null,
+                            payload = snapshot?.payload ?: payload,
+                            messageType = snapshot?.messageType ?: gameAdPromiseTypeFromReason(reason)
+                        )
+                        runCatching {
+                            resolveMethod.invoke(chain.thisObject, promiseId, success)
+                            Logger.i(
+                                TAG,
+                                "Converted game ad bridge reject to success promise=$promiseId type=${snapshot?.messageType} reason=$reason"
+                            )
+                            return@intercept null
+                        }.onFailure {
+                            Logger.w(TAG, "Failed to convert game ad bridge reject to success promise=$promiseId", it)
+                        }
+                    }
                 }
             }
-        })
+            
+            val result = chain.proceed()
+            val payloadAfter = chain.args.getOrNull(2) as? JSONObject
+            if (payloadAfter != null) {
+                val promiseId = extractPromiseId(payloadAfter)
+                if (promiseId != null) {
+                    val reason = chain.args.take(2).joinToString(" ") { it?.toString().orEmpty() }
+                    if (gameAdPromiseSnapshots.containsKey(promiseId) || isRecentGameAdDiagnosticFlow() || reason.hasGameAdSignal()) {
+                        logGameAdDiagnostic(
+                            "bridgeReject.after",
+                            "${methodSignature(bridgeRejectMethod)} promise=$promiseId result=${formatDiagValue(result)} throwable=none"
+                        )
+                    }
+                }
+            }
+            result
+        }
         hooked++
     }
 
     Logger.i(TAG, "Hooked $hooked game ad result helper method(s) in ${bridgeClass.name}")
 }
 
-internal fun hookGameAdServiceDispatchMethods(bridgeClass: Class<*>) {
+internal fun hookGameAdServiceDispatchMethods(module: XposedModule, bridgeClass: Class<*>) {
     if (!gameAdServiceDispatchHooksInstalled.compareAndSet(0, 1)) return
 
     val methods = (bridgeClass.declaredMethods + bridgeClass.methods)
@@ -341,60 +338,54 @@ internal fun hookGameAdServiceDispatchMethods(bridgeClass: Class<*>) {
     var hooked = 0
     methods.forEach { method ->
         method.isAccessible = true
-        XposedBridge.hookMethod(method, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                val bundle = param.args.getOrNull(0) as? Bundle ?: return
-                val messageType = param.args.getOrNull(1)?.toString()?.lowercase()
-                    ?.takeIf { it in GAME_AD_MESSAGE_TYPES } ?: return
-                val payload = buildGameAdPayloadFromServiceBundle(bundle, messageType)
+        module.hook(method).intercept { chain ->
+            val bundle = chain.args.getOrNull(0) as? Bundle ?: return@intercept chain.proceed()
+            val messageType = chain.args.getOrNull(1)?.toString()?.lowercase()
+                ?.takeIf { it in GAME_AD_MESSAGE_TYPES } ?: return@intercept chain.proceed()
+            val payload = buildGameAdPayloadFromServiceBundle(bundle, messageType)
 
-                markGameAdDiagnosticFlow("serviceDispatch ${method.declaringClass.name}.${method.name}")
-                logGameAdDiagnostic(
-                    "serviceDispatch.before",
-                    "${methodSignature(method)} type=$messageType args=${formatDiagArgs(param.args)}"
-                )
-                rememberGameAdPayload(param.thisObject, payload, messageType)
-                if (!ENABLE_GAME_AD_AUTOFIX) return
-                if (rejectUnavailableGameAdPayloadIfNeeded(param.thisObject, payload, messageType, "service dispatch ${method.declaringClass.name}.${method.name}")) {
-                    param.result = null
-                    return
-                }
-                if (!shouldAutofixGameAdMessage(messageType)) return
-
-                if (resolveGameAdPayload(param.thisObject, payload, messageType)) {
-                    dispatchPostResolveGameAdSignals(param.thisObject, payload, messageType)
-                    param.result = null
-                    Logger.i(
-                        TAG,
-                        "Resolved game ad service dispatch type=$messageType in ${method.declaringClass.name}.${method.name}"
-                    )
-                }
+            markGameAdDiagnosticFlow("serviceDispatch ${method.declaringClass.name}.${method.name}")
+            logGameAdDiagnostic(
+                "serviceDispatch.before",
+                "${methodSignature(method)} type=$messageType args=${formatDiagArgs(chain.args.toTypedArray())}"
+            )
+            rememberGameAdPayload(chain.thisObject, payload, messageType)
+            if (!ENABLE_GAME_AD_AUTOFIX) return@intercept chain.proceed()
+            if (rejectUnavailableGameAdPayloadIfNeeded(chain.thisObject, payload, messageType, "service dispatch ${method.declaringClass.name}.${method.name}")) {
+                return@intercept null
             }
+            if (!shouldAutofixGameAdMessage(messageType)) return@intercept chain.proceed()
 
-            override fun afterHookedMethod(param: MethodHookParam) {
-                if (param.args.getOrNull(0) !is Bundle) return
-                val messageType = param.args.getOrNull(1)?.toString()?.lowercase()
-                    ?.takeIf { it in GAME_AD_MESSAGE_TYPES } ?: return
-                logGameAdDiagnostic(
-                    "serviceDispatch.after",
-                    "${methodSignature(method)} type=$messageType result=${formatDiagValue(param.result)} throwable=${formatDiagThrowable(param.throwable)}"
+            if (resolveGameAdPayload(chain.thisObject, payload, messageType)) {
+                dispatchPostResolveGameAdSignals(chain.thisObject, payload, messageType)
+                Logger.i(
+                    TAG,
+                    "Resolved game ad service dispatch type=$messageType in ${method.declaringClass.name}.${method.name}"
                 )
+                return@intercept null
             }
-        })
+            
+            val result = chain.proceed()
+            logGameAdDiagnostic(
+                "serviceDispatch.after",
+                "${methodSignature(method)} type=$messageType result=${formatDiagValue(result)} throwable=none"
+            )
+            result
+        }
         hooked++
     }
 
     Logger.i(TAG, "Hooked $hooked game ad service dispatch method(s) in ${bridgeClass.name}")
 }
 
-internal fun hookGameAdSystemDiagnostics(classLoader: ClassLoader) {
+internal fun hookGameAdSystemDiagnostics(module: XposedModule, classLoader: ClassLoader) {
     if (!ENABLE_GAME_AD_DIAGNOSTICS || !gameAdSystemDiagnosticsInstalled.compareAndSet(0, 1)) return
 
-    hookMessengerSendDiagnostics()
-    hookHandlerMessageDiagnostics(classLoader)
-    hookActivityResultDiagnostics()
-    hookAudienceNetworkViewDiagnostics()
-    hookDynamicGameAdClassDiagnostics(classLoader)
+    hookMessengerSendDiagnostics(module)
+    hookHandlerMessageDiagnostics(module, classLoader)
+    hookActivityResultDiagnostics(module)
+    hookAudienceNetworkViewDiagnostics(module)
+    hookDynamicGameAdClassDiagnostics(module, classLoader)
 
     Logger.i(
         TAG,
