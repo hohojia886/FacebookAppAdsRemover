@@ -67,15 +67,11 @@ class Module : IXposedHookLoadPackage {
         }
 
         private fun debugLogInfo(message: String) {
-            if (BuildConfig.DEBUG) {
-                Log.i(TAG, message)
-            }
+            Logger.i(TAG, message)
         }
 
         private fun debugLogError(message: String, throwable: Throwable) {
-            if (BuildConfig.DEBUG) {
-                Log.e(TAG, message, throwable)
-            }
+            Logger.e(TAG, message, throwable)
         }
 
         private fun installFacebookDexReadyHook(classLoader: ClassLoader) {

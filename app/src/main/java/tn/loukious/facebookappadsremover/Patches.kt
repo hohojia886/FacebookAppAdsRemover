@@ -46,7 +46,7 @@ private const val ENABLE_STORY_POOL_ADD_HOOKS = true
 private const val ENABLE_FEED_SPONSORED_POOL_HOOKS = true
 private const val ENABLE_FEED_UI_MARKER_FALLBACKS = false
 private const val ENABLE_GAME_AD_AUTOFIX = true
-private const val ENABLE_GAME_AD_DIAGNOSTICS = true
+private val ENABLE_GAME_AD_DIAGNOSTICS = BuildConfig.DEBUG
 private const val ENABLE_BROAD_HANDLER_GAME_AD_DIAGNOSTICS = false
 private const val ENABLE_AUDIENCE_NETWORK_VIEW_DIAGNOSTICS = false
 private const val ENABLE_AUDIENCE_NETWORK_REWARD_FALLBACKS = true
@@ -359,30 +359,6 @@ private val REELS_AD_SIGNAL_TOKENS = listOf(
     "banner_ad_"
 )
 
-private object Log {
-    fun i(tag: String, msg: String): Int = if (BuildConfig.DEBUG) AndroidLog.i(tag, msg) else 0
-
-    fun w(tag: String, msg: String): Int = if (BuildConfig.DEBUG) AndroidLog.w(tag, msg) else 0
-
-    fun w(tag: String, msg: String, throwable: Throwable): Int =
-        if (BuildConfig.DEBUG) AndroidLog.w(tag, msg, throwable) else 0
-
-    fun e(tag: String, msg: String): Int = if (BuildConfig.DEBUG) AndroidLog.e(tag, msg) else 0
-
-    fun e(tag: String, msg: String, throwable: Throwable): Int =
-        if (BuildConfig.DEBUG) AndroidLog.e(tag, msg, throwable) else 0
-
-    fun missing(tag: String, hookName: String): Int =
-        AndroidLog.w(tag, "Hook target not found: $hookName")
-
-    fun resolutionFailure(tag: String, msg: String, throwable: Throwable): Int {
-        return if (BuildConfig.DEBUG || throwable.message?.contains("Unable to resolve") == true) {
-            AndroidLog.e(tag, msg, throwable)
-        } else {
-            0
-        }
-    }
-}
 
 private data class FeedListSanitizerHook(
     val method: Method,
@@ -1104,15 +1080,15 @@ private fun findClassesByZeroArgStringTags(
 
 fun installFacebookAdRemover(classLoader: ClassLoader, bridge: DexKitBridge): Boolean {
     return try {
-        Log.i(TAG, "Starting hook install: $BUILD_MARKER")
+        Logger.i(TAG, "Starting hook install: $BUILD_MARKER")
         val hooks = resolveHooks(classLoader, bridge)
         if (!hooks.hasLoadedSecondaryDexTargets()) {
-            Log.w(TAG, "Facebook secondary dex targets are not loaded yet; deferring hook installation")
+            Logger.w(TAG, "Facebook secondary dex targets are not loaded yet; deferring hook installation")
             return false
         }
         installFacebook571FeedComponentGuard(classLoader)
         val feedItemInspector = FeedItemInspector(hooks.storyPoolAddMethods.map { it.parameterTypes[0] })
-        Log.i(TAG, "FeedItemInspector accessors ${feedItemInspector.describeAccessors()}")
+        Logger.i(TAG, "FeedItemInspector accessors ${feedItemInspector.describeAccessors()}")
 
         if (
             ENABLE_UPSTREAM_REELS_AD_HOOKS &&
@@ -1124,16 +1100,16 @@ fun installFacebookAdRemover(classLoader: ClassLoader, bridge: DexKitBridge): Bo
             hooks.listBuilderFactoryMethod?.let { hookListResultFilter(it, "list factory", inspector) }
             hooks.pluginPackBuildMethods.forEach { hookPluginPackFallback(it, inspector) }
         } else if (ENABLE_UPSTREAM_REELS_AD_HOOKS) {
-            Log.w(TAG, "Upstream Reels targets unresolved; continuing with independent feed ad hooks")
+            Logger.w(TAG, "Upstream Reels targets unresolved; continuing with independent feed ad hooks")
         } else {
-            Log.i(TAG, "Skipped upstream Reels list/plugin hooks to preserve feed Reels carousels")
+            Logger.i(TAG, "Skipped upstream Reels list/plugin hooks to preserve feed Reels carousels")
         }
         hooks.instreamBannerEligibilityMethod?.let { hookInstreamBannerEligibility(it) }
         hooks.indicatorPillAdEligibilityMethod?.let { hookIndicatorPillAdEligibility(it) }
         hooks.reelsBannerRenderMethods.forEach { method ->
             runCatching { hookReelsBannerRender(method) }
                 .onFailure {
-                    Log.e(
+                    Logger.e(
                         TAG,
                         "Failed to hook Reels banner render ${method.declaringClass.name}.${method.name}",
                         it
@@ -1144,7 +1120,7 @@ fun installFacebookAdRemover(classLoader: ClassLoader, bridge: DexKitBridge): Bo
             hooks.feedCsrFilterHooks.forEach { hook ->
                 runCatching { hookFeedCsrFilterInput(hook, feedItemInspector) }
                     .onFailure {
-                        Log.e(
+                        Logger.e(
                             TAG,
                             "Failed to hook feed CSR filter ${hook.method.declaringClass.name}.${hook.method.name}",
                             it
@@ -1152,13 +1128,13 @@ fun installFacebookAdRemover(classLoader: ClassLoader, bridge: DexKitBridge): Bo
                     }
             }
         } else {
-            Log.i(TAG, "Skipped feed CSR filter hooks to isolate feed Reels carousel loading")
+            Logger.i(TAG, "Skipped feed CSR filter hooks to isolate feed Reels carousel loading")
         }
         if (ENABLE_LATE_FEED_LIST_HOOKS) {
             hooks.lateFeedListHooks.forEach { hook ->
                 runCatching { hookLateFeedListSanitizer(hook, feedItemInspector) }
                     .onFailure {
-                        Log.e(
+                        Logger.e(
                             TAG,
                             "Failed to hook late feed list ${hook.method.declaringClass.name}.${hook.method.name}",
                             it
@@ -1166,28 +1142,28 @@ fun installFacebookAdRemover(classLoader: ClassLoader, bridge: DexKitBridge): Bo
                     }
             }
         } else {
-            Log.i(TAG, "Skipped late feed list hooks to isolate feed Reels carousel loading")
+            Logger.i(TAG, "Skipped late feed list hooks to isolate feed Reels carousel loading")
         }
         if (ENABLE_STORY_POOL_ADD_HOOKS) {
             hooks.storyPoolAddMethods.forEach { method ->
                 runCatching { hookStoryPoolAdd(method, feedItemInspector) }
                     .onFailure {
-                        Log.e(TAG, "Failed to hook story pool add ${method.declaringClass.name}.${method.name}", it)
+                        Logger.e(TAG, "Failed to hook story pool add ${method.declaringClass.name}.${method.name}", it)
                     }
             }
         } else {
-            Log.i(TAG, "Skipped story pool add hooks to isolate feed Reels carousel loading")
+            Logger.i(TAG, "Skipped story pool add hooks to isolate feed Reels carousel loading")
         }
         if (ENABLE_FEED_SPONSORED_POOL_HOOKS) {
             hooks.sponsoredPoolAddMethod?.let { hookSponsoredPoolAdd(it) }
             hooks.sponsoredStoryNextMethod?.let { hookSponsoredStoryNext(it) }
         } else {
-            Log.i(TAG, "Skipped feed sponsored pool hooks to isolate feed Reels carousel loading")
+            Logger.i(TAG, "Skipped feed sponsored pool hooks to isolate feed Reels carousel loading")
         }
         hooks.storyAdProviders.forEach { provider ->
             runCatching { hookStoryAdProvider(provider) }
                 .onFailure {
-                    Log.e(TAG, "Failed to hook story ad source ${provider.providerClass.name}", it)
+                    Logger.e(TAG, "Failed to hook story ad source ${provider.providerClass.name}", it)
                 }
         }
         if (ENABLE_FEED_SPONSORED_POOL_HOOKS) {
@@ -1202,7 +1178,7 @@ fun installFacebookAdRemover(classLoader: ClassLoader, bridge: DexKitBridge): Bo
         hooks.gameAdRequestMethods.forEach { method ->
             runCatching { hookGameAdRequest(method) }
                 .onFailure {
-                    Log.e(
+                    Logger.e(
                         TAG,
                         "Failed to hook game ad request ${method.declaringClass.name}.${method.name}",
                         it
@@ -1212,7 +1188,7 @@ fun installFacebookAdRemover(classLoader: ClassLoader, bridge: DexKitBridge): Bo
         hooks.gameAdBridgePostMessageMethod?.let { method ->
             runCatching { hookGameAdBridge(method) }
                 .onFailure {
-                    Log.e(
+                    Logger.e(
                         TAG,
                         "Failed to hook game ad bridge ${method.declaringClass.name}.${method.name}",
                         it
@@ -1222,7 +1198,7 @@ fun installFacebookAdRemover(classLoader: ClassLoader, bridge: DexKitBridge): Bo
         hooks.gameAdRequestMethods.firstOrNull()?.declaringClass?.let { bridgeClass ->
             runCatching { hookGameAdResultMethods(bridgeClass) }
                 .onFailure {
-                    Log.e(
+                    Logger.e(
                         TAG,
                         "Failed to hook game ad result helpers ${bridgeClass.name}",
                         it
@@ -1230,7 +1206,7 @@ fun installFacebookAdRemover(classLoader: ClassLoader, bridge: DexKitBridge): Bo
                 }
             runCatching { hookGameAdServiceDispatchMethods(bridgeClass) }
                 .onFailure {
-                    Log.e(
+                    Logger.e(
                         TAG,
                         "Failed to hook game ad service dispatch ${bridgeClass.name}",
                         it
@@ -1239,16 +1215,16 @@ fun installFacebookAdRemover(classLoader: ClassLoader, bridge: DexKitBridge): Bo
         }
         if (ENABLE_AUDIENCE_NETWORK_REWARD_FALLBACKS) {
             runCatching { hookAudienceNetworkRewardFallbacks(classLoader) }
-                .onFailure { Log.e(TAG, "Failed to hook Audience Network reward fallbacks", it) }
+                .onFailure { Logger.e(TAG, "Failed to hook Audience Network reward fallbacks", it) }
         } else {
-            Log.i(TAG, "Skipped Audience Network reward fallback hooks for compatibility mode")
+            Logger.i(TAG, "Skipped Audience Network reward fallback hooks for compatibility mode")
         }
         runCatching { hookGameAdSystemDiagnostics(classLoader) }
-            .onFailure { Log.e(TAG, "Failed to hook game ad diagnostics", it) }
+            .onFailure { Logger.e(TAG, "Failed to hook game ad diagnostics", it) }
         hooks.playableAdActivityOnCreate?.let { method ->
             runCatching { hookPlayableAdActivity(method) }
                 .onFailure {
-                    Log.e(
+                    Logger.e(
                         TAG,
                         "Failed to hook playable ad activity ${method.declaringClass.name}.${method.name}",
                         it
@@ -1258,7 +1234,7 @@ fun installFacebookAdRemover(classLoader: ClassLoader, bridge: DexKitBridge): Bo
         hooks.gameAdUiActivityMethods.forEach { method ->
             runCatching { hookPlayableAdActivity(method) }
                 .onFailure {
-                    Log.e(
+                    Logger.e(
                         TAG,
                         "Failed to hook game ad activity ${method.declaringClass.name}.${method.name}",
                         it
@@ -1266,12 +1242,12 @@ fun installFacebookAdRemover(classLoader: ClassLoader, bridge: DexKitBridge): Bo
                 }
         }
         runCatching { hookGlobalGameAdActivityLifecycleFallback() }
-            .onFailure { Log.e(TAG, "Failed to hook global game ad activity lifecycle fallback", it) }
+            .onFailure { Logger.e(TAG, "Failed to hook global game ad activity lifecycle fallback", it) }
         runCatching { hookGameAdActivityLaunchFallbacks() }
-            .onFailure { Log.e(TAG, "Failed to hook game ad launch fallbacks", it) }
+            .onFailure { Logger.e(TAG, "Failed to hook game ad launch fallbacks", it) }
         runCatching { hookGlobalGameAdSurfaceFallbacks() }
-            .onFailure { Log.e(TAG, "Failed to hook global game ad surface fallbacks", it) }
-        Log.i(
+            .onFailure { Logger.e(TAG, "Failed to hook global game ad surface fallbacks", it) }
+        Logger.i(
             TAG,
             "Installed hooks: append=${if (ENABLE_UPSTREAM_REELS_AD_HOOKS) hooks.listBuilderAppendMethod?.let { "${it.declaringClass.name}.${it.name}" } ?: "none" else "disabled"}" +
                 ", factory=${if (ENABLE_UPSTREAM_REELS_AD_HOOKS) hooks.listBuilderFactoryMethod?.let { "${it.declaringClass.name}.${it.name}" } ?: "none" else "disabled"}" +
@@ -1293,7 +1269,7 @@ fun installFacebookAdRemover(classLoader: ClassLoader, bridge: DexKitBridge): Bo
         )
         true
     } catch (t: Throwable) {
-        Log.resolutionFailure(TAG, "Failed to install Facebook ad remover hooks", t)
+        Logger.resolutionFailure(TAG, "Failed to install Facebook ad remover hooks", t)
         false
     }
 }
@@ -1326,7 +1302,7 @@ private fun resolveHooks(classLoader: ClassLoader, bridge: DexKitBridge): Resolv
         )
     }
 
-    Log.i(
+    Logger.i(
         TAG,
         "DexKit groups: reels=${classGroups["listBuilderByString"]?.size ?: 0}, " +
             "plugin=${classGroups["pluginPack"]?.size ?: 0}, " +
@@ -1377,24 +1353,24 @@ private fun resolveHooks(classLoader: ClassLoader, bridge: DexKitBridge): Resolv
     val playableAdActivityOnCreate = resolvePlayableAdActivityOnCreate(classLoader)
     val gameAdUiActivityMethods = resolveGameAdUiActivityMethods(classLoader)
 
-    Log.i(TAG, "Resolved reels list builder=${listBuilderClass?.name ?: "none"}")
-    Log.i(TAG, "Resolved plugin packs=${pluginPackClasses.joinToString { it.name }}")
-    Log.i(TAG, "Resolved banner state eligibility=${instreamBannerEligibilityMethod?.declaringClass?.name ?: "none"}")
-    Log.i(TAG, "Resolved indicator pill eligibility=${indicatorPillAdEligibilityMethod?.declaringClass?.name ?: "none"}")
-    Log.i(TAG, "Resolved Reels banner render hooks=${reelsBannerRenderMethods.joinToString { it.declaringClass.name }}")
-    Log.i(TAG, "Resolved feed CSR filters=${feedCsrFilterHooks.joinToString { "${it.method.declaringClass.name}[list=${it.listArgIndex}]" }}")
-    Log.i(TAG, "Resolved late feed list hooks=${lateFeedListHooks.joinToString { it.method.declaringClass.name }}")
-    Log.i(TAG, "Resolved story pool add hooks=${storyPoolAddMethods.joinToString { it.declaringClass.name }}")
-    Log.i(TAG, "Resolved feed sponsored pool=${sponsoredPoolClass?.name ?: "none"}")
-    Log.i(TAG, "Resolved feed sponsored manager=${sponsoredStoryManagerClass?.name ?: "none"}")
-    Log.i(TAG, "Resolved feed add method=${poolAddMethod?.name ?: "none"}")
-    Log.i(TAG, "Resolved feed next method=${sponsoredStoryNextMethod?.name ?: "none"}")
-    Log.i(TAG, "Resolved story ad source classes=${storyAdProviderClasses.joinToString { it.name }}")
-    Log.i(TAG, "Resolved story ad providers=${storyAdProviders.joinToString { it.providerClass.name }}")
-    Log.i(TAG, "Resolved game ad requests=${gameAdRequestMethods.joinToString { it.declaringClass.name }}")
-    Log.i(TAG, "Resolved game ad bridge=${gameAdBridgePostMessageMethod?.declaringClass?.name ?: "none"}")
-    Log.i(TAG, "Resolved playable ad activity=${playableAdActivityOnCreate?.declaringClass?.name ?: "none"}")
-    Log.i(TAG, "Resolved game ad UI activities=${gameAdUiActivityMethods.joinToString { it.declaringClass.name }}")
+    Logger.i(TAG, "Resolved reels list builder=${listBuilderClass?.name ?: "none"}")
+    Logger.i(TAG, "Resolved plugin packs=${pluginPackClasses.joinToString { it.name }}")
+    Logger.i(TAG, "Resolved banner state eligibility=${instreamBannerEligibilityMethod?.declaringClass?.name ?: "none"}")
+    Logger.i(TAG, "Resolved indicator pill eligibility=${indicatorPillAdEligibilityMethod?.declaringClass?.name ?: "none"}")
+    Logger.i(TAG, "Resolved Reels banner render hooks=${reelsBannerRenderMethods.joinToString { it.declaringClass.name }}")
+    Logger.i(TAG, "Resolved feed CSR filters=${feedCsrFilterHooks.joinToString { "${it.method.declaringClass.name}[list=${it.listArgIndex}]" }}")
+    Logger.i(TAG, "Resolved late feed list hooks=${lateFeedListHooks.joinToString { it.method.declaringClass.name }}")
+    Logger.i(TAG, "Resolved story pool add hooks=${storyPoolAddMethods.joinToString { it.declaringClass.name }}")
+    Logger.i(TAG, "Resolved feed sponsored pool=${sponsoredPoolClass?.name ?: "none"}")
+    Logger.i(TAG, "Resolved feed sponsored manager=${sponsoredStoryManagerClass?.name ?: "none"}")
+    Logger.i(TAG, "Resolved feed add method=${poolAddMethod?.name ?: "none"}")
+    Logger.i(TAG, "Resolved feed next method=${sponsoredStoryNextMethod?.name ?: "none"}")
+    Logger.i(TAG, "Resolved story ad source classes=${storyAdProviderClasses.joinToString { it.name }}")
+    Logger.i(TAG, "Resolved story ad providers=${storyAdProviders.joinToString { it.providerClass.name }}")
+    Logger.i(TAG, "Resolved game ad requests=${gameAdRequestMethods.joinToString { it.declaringClass.name }}")
+    Logger.i(TAG, "Resolved game ad bridge=${gameAdBridgePostMessageMethod?.declaringClass?.name ?: "none"}")
+    Logger.i(TAG, "Resolved playable ad activity=${playableAdActivityOnCreate?.declaringClass?.name ?: "none"}")
+    Logger.i(TAG, "Resolved game ad UI activities=${gameAdUiActivityMethods.joinToString { it.declaringClass.name }}")
     logMissingHooks(
         pluginPackClasses = pluginPackClasses,
         factoryMethod = factoryMethod,
@@ -1461,34 +1437,34 @@ private fun logMissingHooks(
     playableAdActivityOnCreate: Method?,
     gameAdUiActivityMethods: List<Method>
 ) {
-    if (factoryMethod == null) Log.missing(TAG, "Reels list factory method")
+    if (factoryMethod == null) Logger.missing(TAG, "Reels list factory method")
     if (pluginPackClasses.isEmpty()) {
-        Log.missing(TAG, "PluginPack classes")
+        Logger.missing(TAG, "PluginPack classes")
     } else if (pluginMethods.isEmpty()) {
-        Log.missing(TAG, "PluginPack build methods")
+        Logger.missing(TAG, "PluginPack build methods")
     }
-    if (instreamBannerEligibilityMethod == null) Log.missing(TAG, "Instream banner eligibility method")
-    if (indicatorPillAdEligibilityMethod == null) Log.missing(TAG, "Reels indicator pill eligibility method")
-    if (reelsBannerRenderMethods.isEmpty()) Log.missing(TAG, "Reels banner render methods")
-    if (feedCsrFilterHooks.isEmpty()) Log.missing(TAG, "Feed CSR filter methods")
-    if (lateFeedListHooks.isEmpty()) Log.missing(TAG, "Late feed list sanitizer methods")
-    if (storyPoolAddMethods.isEmpty()) Log.missing(TAG, "Story pool add methods")
+    if (instreamBannerEligibilityMethod == null) Logger.missing(TAG, "Instream banner eligibility method")
+    if (indicatorPillAdEligibilityMethod == null) Logger.missing(TAG, "Reels indicator pill eligibility method")
+    if (reelsBannerRenderMethods.isEmpty()) Logger.missing(TAG, "Reels banner render methods")
+    if (feedCsrFilterHooks.isEmpty()) Logger.missing(TAG, "Feed CSR filter methods")
+    if (lateFeedListHooks.isEmpty()) Logger.missing(TAG, "Late feed list sanitizer methods")
+    if (storyPoolAddMethods.isEmpty()) Logger.missing(TAG, "Story pool add methods")
     if (sponsoredPoolClass == null) {
-        Log.missing(TAG, "Sponsored pool class")
+        Logger.missing(TAG, "Sponsored pool class")
     } else if (poolAddMethod == null) {
-        Log.missing(TAG, "Sponsored pool add method")
+        Logger.missing(TAG, "Sponsored pool add method")
     }
     if (sponsoredStoryManagerClass == null) {
-        Log.missing(TAG, "Sponsored story manager class")
+        Logger.missing(TAG, "Sponsored story manager class")
     } else if (sponsoredStoryNextMethod == null) {
-        Log.missing(TAG, "Sponsored story next method")
+        Logger.missing(TAG, "Sponsored story next method")
     }
-    if (storyAdProviderClasses.isEmpty()) Log.missing(TAG, "Story ad source classes")
-    if (storyAdProviders.isEmpty()) Log.missing(TAG, "Story ad provider methods")
-    if (gameAdRequestMethods.isEmpty()) Log.missing(TAG, "Game ad request methods")
-    if (gameAdBridgePostMessageMethod == null) Log.missing(TAG, "Game ad bridge postMessage method")
-    if (playableAdActivityOnCreate == null) Log.missing(TAG, "Playable ad activity lifecycle method")
-    if (gameAdUiActivityMethods.isEmpty()) Log.missing(TAG, "Game ad UI activity lifecycle methods")
+    if (storyAdProviderClasses.isEmpty()) Logger.missing(TAG, "Story ad source classes")
+    if (storyAdProviders.isEmpty()) Logger.missing(TAG, "Story ad provider methods")
+    if (gameAdRequestMethods.isEmpty()) Logger.missing(TAG, "Game ad request methods")
+    if (gameAdBridgePostMessageMethod == null) Logger.missing(TAG, "Game ad bridge postMessage method")
+    if (playableAdActivityOnCreate == null) Logger.missing(TAG, "Playable ad activity lifecycle method")
+    if (gameAdUiActivityMethods.isEmpty()) Logger.missing(TAG, "Game ad UI activity lifecycle methods")
 }
 
 private fun resolveAdKindEnumClass(
@@ -1747,7 +1723,7 @@ fun installFacebook571FeedSourceFastPath(classLoader: ClassLoader): Boolean {
         hookStoryAdProvider(provider)
     }
     if (providers.isNotEmpty()) {
-        Log.i(TAG, "Installed FB 571 fast feed source hooks=${providers.joinToString { it.providerClass.name }}")
+        Logger.i(TAG, "Installed FB 571 fast feed source hooks=${providers.joinToString { it.providerClass.name }}")
     }
     return responseHooksInstalled
 }
@@ -1807,7 +1783,7 @@ fun installFacebook571FeedComponentGuard(classLoader: ClassLoader): Boolean {
         installed++
     }
     if (installed > 0) {
-        Log.i(
+        Logger.i(
             TAG,
             "Installed FB 571 sponsored feed component guards=" +
                 renderMethods.joinToString { "${it.declaringClass.name}.${it.name}" }
@@ -1828,30 +1804,30 @@ private fun logSurvivingFeedTypeContract(classLoader: ClassLoader, className: St
     val type = runCatching {
         Class.forName(className, false, classLoader)
     }.getOrElse {
-        Log.w(TAG, "SurvivingFeedType class unavailable=$className")
+        Logger.w(TAG, "SurvivingFeedType class unavailable=$className")
         return
     }
-    Log.i(
+    Logger.i(
         TAG,
         "SurvivingFeedType class=${type.name} super=${type.superclass?.name} " +
             "interfaces=${type.interfaces.joinToString { it.name }}"
     )
     type.declaredFields.forEach { field ->
-        Log.i(
+        Logger.i(
             TAG,
             "SurvivingFeedType field=${type.name}.${field.name}:${field.type.name} " +
                 "static=${Modifier.isStatic(field.modifiers)}"
         )
     }
     type.declaredConstructors.forEach { constructor ->
-        Log.i(
+        Logger.i(
             TAG,
             "SurvivingFeedType ctor=${type.name}(" +
                 constructor.parameterTypes.joinToString { it.name } + ")"
         )
     }
     type.declaredMethods.forEach { method ->
-        Log.i(
+        Logger.i(
             TAG,
             "SurvivingFeedType method=${type.name}.${method.name}(" +
                 method.parameterTypes.joinToString { it.name } + "):${method.returnType.name} " +
@@ -1883,7 +1859,7 @@ fun installFacebook571VisibleAdTrace(classLoader: ClassLoader) {
             )
         }
     })
-    Log.i(TAG, "Installed FB 571 visible-ad holder tracer")
+    Logger.i(TAG, "Installed FB 571 visible-ad holder tracer")
 }
 
 private data class VisibleAdGraphNode(
@@ -1923,7 +1899,7 @@ private fun traceVisibleFacebook571FeedAd(
     val adapter = invokeMethodByName(recycler, "getAdapter")
     val bindingPosition = invokeMethodByName(holder, "getBindingAdapterPosition")
     val absolutePosition = invokeMethodByName(holder, "getAbsoluteAdapterPosition")
-    Log.i(
+    Logger.i(
         TAG,
         "VisibleAdTrace marker=$marker recycler=${recycler.javaClass.name} " +
             "holder=${holder?.javaClass?.name ?: "null"} adapter=${adapter?.javaClass?.name ?: "null"} " +
@@ -1986,7 +1962,7 @@ private fun traceVisibleAdObjectGraph(
         val typeName = type.name
         if (isTraceableFeedObject(type)) {
             matches++
-            Log.i(
+            Logger.i(
                 TAG,
                 "VisibleAdTrace feedObject path=${node.path} class=$typeName " +
                     inspector.describe(value)
@@ -1997,7 +1973,7 @@ private fun traceVisibleAdObjectGraph(
             val text = value.toString()
             if (isVisibleAdTraceString(text)) {
                 matches++
-                Log.i(TAG, "VisibleAdTrace string path=${node.path} value=${text.take(300)}")
+                Logger.i(TAG, "VisibleAdTrace string path=${node.path} value=${text.take(300)}")
             }
             continue
         }
@@ -2034,7 +2010,7 @@ private fun traceVisibleAdObjectGraph(
             )
         }
     }
-    Log.i(TAG, "VisibleAdTrace graph root=$rootPath visited=$visited matches=$matches")
+    Logger.i(TAG, "VisibleAdTrace graph root=$rootPath visited=$visited matches=$matches")
 }
 
 private fun isTraceableFeedObject(type: Class<*>): Boolean {
@@ -2165,7 +2141,7 @@ private fun installFacebook571FeedResponseFastPath(classLoader: ClassLoader): Bo
     val sponsoredPoolMethod = resolveFacebook571SponsoredPoolAdd(classLoader)
     val poolInstalled = sponsoredPoolMethod?.let(::hookSponsoredPoolAdd) == true
     if (installed > 0) {
-        Log.i(
+        Logger.i(
             TAG,
             "Installed FB 571 decoded feed response hooks=$installed " +
                 "targets=${hooks.joinToString { "${it.method.declaringClass.name}.${it.method.name}" }} " +
@@ -2173,7 +2149,7 @@ private fun installFacebook571FeedResponseFastPath(classLoader: ClassLoader): Bo
         )
     }
     if (networkInstalled > 0 || poolInstalled) {
-        Log.i(
+        Logger.i(
             TAG,
             "Installed FB 571 decoded network feed hooks=" +
                 "${networkHooks.joinToString { "${it.method.declaringClass.name}.${it.method.name}" }} " +
@@ -2646,7 +2622,7 @@ private fun resolveGameAdUiActivityMethods(classLoader: ClassLoader): List<Metho
     classNames.forEach { className ->
         val activityClass = runCatching { classLoader.loadClass(className) }.getOrNull()
         if (activityClass == null) {
-            Log.w(TAG, "Game ad UI class not loadable: $className")
+            Logger.w(TAG, "Game ad UI class not loadable: $className")
             return@forEach
         }
         (activityClass.declaredMethods + activityClass.methods)
@@ -2691,7 +2667,7 @@ private fun resolveGameAdUiActivityMethodsFallback(
 private fun hookListBuilderAppend(method: Method, inspector: AdStoryInspector) {
     val listArgIndex = method.listParameterIndexes().singleOrNull()
     if (listArgIndex == null) {
-        Log.w(
+        Logger.w(
             TAG,
             "Skipping list append hook because ${method.declaringClass.name}.${method.name} does not expose exactly one List parameter"
         )
@@ -2718,7 +2694,7 @@ private fun hookListBuilderAppend(method: Method, inspector: AdStoryInspector) {
             }
 
             if (removed > 0) {
-                Log.i(TAG, "Removed $removed ad item(s) from upstream list append")
+                Logger.i(TAG, "Removed $removed ad item(s) from upstream list append")
             }
         }
     })
@@ -2730,7 +2706,7 @@ private fun hookListResultFilter(method: Method, source: String, inspector: AdSt
             val result = param.result as? MutableList<Any?> ?: return
             val removed = filterAdItems(result, inspector)
             if (removed > 0) {
-                Log.i(TAG, "Removed $removed ad item(s) from $source")
+                Logger.i(TAG, "Removed $removed ad item(s) from $source")
             }
         }
     })
@@ -2740,12 +2716,12 @@ private fun hookPluginPackFallback(method: Method, inspector: AdStoryInspector) 
     XposedBridge.hookMethod(method, object : XC_MethodHook() {
         override fun beforeHookedMethod(param: MethodHookParam) {
             if (isMarketplaceAdsPluginPack(param.thisObject)) {
-                Log.i(TAG, "Returning an empty plugin pack for marketplace ads (${method.declaringClass.name})")
+                Logger.i(TAG, "Returning an empty plugin pack for marketplace ads (${method.declaringClass.name})")
                 param.result = arrayListOf<Any?>()
                 return
             }
             if (inspector.containsAdStory(param.thisObject)) {
-                Log.i(TAG, "Returning an empty plugin pack for an ad-backed story")
+                Logger.i(TAG, "Returning an empty plugin pack for an ad-backed story")
                 param.result = arrayListOf<Any?>()
             }
         }
@@ -2755,7 +2731,7 @@ private fun hookPluginPackFallback(method: Method, inspector: AdStoryInspector) 
             val result = param.result as? MutableList<Any?> ?: return
             val removed = filterAdItems(result, inspector)
             if (removed > 0) {
-                Log.i(TAG, "Removed $removed ad plugin item(s)")
+                Logger.i(TAG, "Removed $removed ad plugin item(s)")
             }
         }
     })
@@ -2810,7 +2786,7 @@ private fun hookFeedCsrFilterInput(
 
             val rebuilt = buildImmutableListLike(param.args.getOrNull(hook.listArgIndex), keptItems) ?: return
             param.args[hook.listArgIndex] = rebuilt
-            Log.i(TAG, "Removed $removed sponsored feed item(s) before ${hook.method.declaringClass.name}.${hook.method.name}")
+            Logger.i(TAG, "Removed $removed sponsored feed item(s) before ${hook.method.declaringClass.name}.${hook.method.name}")
         }
 
         override fun afterHookedMethod(param: MethodHookParam) {
@@ -2828,7 +2804,7 @@ private fun hookFeedCsrFilterInput(
                     }
                 }
                 if (removed > 0 && replaceFeedItemsInResult(param, keptItems)) {
-                    Log.i(TAG, "Removed $removed sponsored feed item(s) from result of ${hook.method.declaringClass.name}.${hook.method.name}")
+                    Logger.i(TAG, "Removed $removed sponsored feed item(s) from result of ${hook.method.declaringClass.name}.${hook.method.name}")
                 }
             }
         }
@@ -2867,7 +2843,7 @@ private fun hookLateFeedListSanitizer(
 
             val rebuilt = buildImmutableListLike(param.args.getOrNull(hook.listArgIndex), keptItems) ?: return
             param.args[hook.listArgIndex] = rebuilt
-            Log.i(
+            Logger.i(
                 TAG,
                 "Late-stage removed $removed sponsored feed item(s) before ${hook.method.declaringClass.name}.${hook.method.name}"
             )
@@ -2902,7 +2878,7 @@ private fun logHookHitThrottled(hookName: String, method: Method, detail: String
     val hits = hookHitCounters.computeIfAbsent(hookName) { AtomicInteger(0) }.incrementAndGet()
     if (hits <= 3 || hits % HOOK_HIT_LOG_EVERY == 0) {
         val extra = detail?.let { " $it" } ?: ""
-        Log.i(TAG, "Hook hit $hookName count=$hits at ${method.declaringClass.name}.${method.name}$extra")
+        Logger.i(TAG, "Hook hit $hookName count=$hits at ${method.declaringClass.name}.${method.name}$extra")
     }
 }
 
@@ -2955,18 +2931,18 @@ private fun hookGameAdRequest(method: Method) {
             if (resolveGameAdPayload(param.thisObject, payload, messageType)) {
                 dispatchPostResolveGameAdSignals(param.thisObject, payload, messageType)
                 param.result = null
-                Log.i(
+                Logger.i(
                     TAG,
                     "Resolved game ad request as success in ${method.declaringClass.name}.${method.name}"
                 )
             } else if (rejectGameAdPayload(param.thisObject, payload)) {
                 param.result = null
-                Log.i(
+                Logger.i(
                     TAG,
                     "Rejected game ad request in ${method.declaringClass.name}.${method.name}"
                 )
             } else {
-                Log.w(
+                Logger.w(
                     TAG,
                     "Unable to resolve or reject game ad request ${method.declaringClass.name}.${method.name}"
                 )
@@ -3008,18 +2984,18 @@ private fun hookGameAdBridge(method: Method) {
             if (resolveGameAdPayload(param.thisObject, payload, messageType)) {
                 dispatchPostResolveGameAdSignals(param.thisObject, payload, messageType)
                 param.result = null
-                Log.i(
+                Logger.i(
                     TAG,
                     "Resolved game ad bridge message type=$messageType in ${method.declaringClass.name}.${method.name}"
                 )
             } else if (rejectGameAdPayload(param.thisObject, payload)) {
                 param.result = null
-                Log.i(
+                Logger.i(
                     TAG,
                     "Rejected game ad bridge message type=$messageType in ${method.declaringClass.name}.${method.name}"
                 )
             } else {
-                Log.w(
+                Logger.w(
                     TAG,
                     "Unable to resolve or reject game ad bridge message type=$messageType in ${method.declaringClass.name}.${method.name}"
                 )
@@ -3069,7 +3045,7 @@ private fun hookGameAdResultMethods(bridgeClass: Class<*>) {
                     payload = snapshot.payload,
                     messageType = snapshot.messageType
                 )
-                Log.i(TAG, "Forced successful game ad resolve promise=$promiseId type=${snapshot.messageType}")
+                Logger.i(TAG, "Forced successful game ad resolve promise=$promiseId type=${snapshot.messageType}")
             }
 
             override fun afterHookedMethod(param: MethodHookParam) {
@@ -3109,12 +3085,12 @@ private fun hookGameAdResultMethods(bridgeClass: Class<*>) {
                 runCatching {
                     XposedBridge.invokeOriginalMethod(resolveMethod, param.thisObject, arrayOf(promiseId, success))
                     param.result = null
-                    Log.i(
+                    Logger.i(
                         TAG,
                         "Converted game ad reject to success promise=$promiseId type=${snapshot?.messageType} reason=$reason"
                     )
                 }.onFailure {
-                    Log.w(TAG, "Failed to convert game ad reject to success promise=$promiseId", it)
+                    Logger.w(TAG, "Failed to convert game ad reject to success promise=$promiseId", it)
                 }
             }
 
@@ -3158,12 +3134,12 @@ private fun hookGameAdResultMethods(bridgeClass: Class<*>) {
                 runCatching {
                     XposedBridge.invokeOriginalMethod(resolveMethod, param.thisObject, arrayOf(promiseId, success))
                     param.result = null
-                    Log.i(
+                    Logger.i(
                         TAG,
                         "Converted game ad bridge reject to success promise=$promiseId type=${snapshot?.messageType} reason=$reason"
                     )
                 }.onFailure {
-                    Log.w(TAG, "Failed to convert game ad bridge reject to success promise=$promiseId", it)
+                    Logger.w(TAG, "Failed to convert game ad bridge reject to success promise=$promiseId", it)
                 }
             }
 
@@ -3182,7 +3158,7 @@ private fun hookGameAdResultMethods(bridgeClass: Class<*>) {
         hooked++
     }
 
-    Log.i(TAG, "Hooked $hooked game ad result helper method(s) in ${bridgeClass.name}")
+    Logger.i(TAG, "Hooked $hooked game ad result helper method(s) in ${bridgeClass.name}")
 }
 
 private fun hookGameAdServiceDispatchMethods(bridgeClass: Class<*>) {
@@ -3225,7 +3201,7 @@ private fun hookGameAdServiceDispatchMethods(bridgeClass: Class<*>) {
                 if (resolveGameAdPayload(param.thisObject, payload, messageType)) {
                     dispatchPostResolveGameAdSignals(param.thisObject, payload, messageType)
                     param.result = null
-                    Log.i(
+                    Logger.i(
                         TAG,
                         "Resolved game ad service dispatch type=$messageType in ${method.declaringClass.name}.${method.name}"
                     )
@@ -3245,7 +3221,7 @@ private fun hookGameAdServiceDispatchMethods(bridgeClass: Class<*>) {
         hooked++
     }
 
-    Log.i(TAG, "Hooked $hooked game ad service dispatch method(s) in ${bridgeClass.name}")
+    Logger.i(TAG, "Hooked $hooked game ad service dispatch method(s) in ${bridgeClass.name}")
 }
 
 private fun hookGameAdSystemDiagnostics(classLoader: ClassLoader) {
@@ -3257,7 +3233,7 @@ private fun hookGameAdSystemDiagnostics(classLoader: ClassLoader) {
     hookAudienceNetworkViewDiagnostics()
     hookDynamicGameAdClassDiagnostics(classLoader)
 
-    Log.i(
+    Logger.i(
         TAG,
         "Hooked passive game ad diagnostic probes: marker=$BUILD_MARKER " +
             "broadHandler=$ENABLE_BROAD_HANDLER_GAME_AD_DIAGNOSTICS " +
@@ -3516,11 +3492,11 @@ private fun hookAudienceNetworkViewDiagnostics() {
                 }
             })
         }.onFailure {
-            Log.w(TAG, "Failed to hook Audience Network view diagnostic ${method.declaringClass.name}.${method.name}", it)
+            Logger.w(TAG, "Failed to hook Audience Network view diagnostic ${method.declaringClass.name}.${method.name}", it)
         }
     }
 
-    Log.i(TAG, "Hooked ${viewMethods.size} Audience Network view diagnostic method(s)")
+    Logger.i(TAG, "Hooked ${viewMethods.size} Audience Network view diagnostic method(s)")
 }
 
 private fun dumpAudienceNetworkActivityState(activity: Activity, source: String) {
@@ -3704,7 +3680,7 @@ private fun tryHookAudienceNetworkViewListenerClass(clazz: Class<*>, source: Str
                 })
                 hooked++
             }.onFailure {
-                Log.w(TAG, "Failed to hook Audience Network listener diagnostic ${clazz.name}.${method.name}", it)
+                Logger.w(TAG, "Failed to hook Audience Network listener diagnostic ${clazz.name}.${method.name}", it)
             }
         }
 
@@ -3915,14 +3891,14 @@ private fun scheduleAudienceNetworkRegisteredExitClick(view: View, source: Strin
     }
     if (!shouldSchedule) return
 
-    Log.i(TAG, "Scheduled Audience Network final exit click for ${view.javaClass.name} via $source")
+    Logger.i(TAG, "Scheduled Audience Network final exit click for ${view.javaClass.name} via $source")
     listOf(0L, 250L, 500L, 1_000L, 2_000L, 3_500L, 5_000L, 7_500L).forEach { delayMs ->
         view.postDelayed({
             if (!isAudienceNetworkFinalExitViewReady(view)) return@postDelayed
             val clicked = runCatching { view.performClick() }.getOrDefault(false)
             if (clicked) {
                 lastGameAdActivityCloseMs.set(System.currentTimeMillis())
-                Log.i(
+                Logger.i(
                     TAG,
                     "Clicked registered Audience Network final exit ${view.javaClass.name} via $source delay=${delayMs}ms"
                 )
@@ -4046,12 +4022,12 @@ private fun tryHookGameAdDiagnosticClass(clazz: Class<*>) {
                 })
                 hooked++
             }.onFailure {
-                Log.w(TAG, "Failed to hook game ad diagnostic method ${clazz.name}.${method.name}", it)
+                Logger.w(TAG, "Failed to hook game ad diagnostic method ${clazz.name}.${method.name}", it)
             }
         }
 
     if (hooked > 0) {
-        Log.i(TAG, "Hooked $hooked passive game ad diagnostic method(s) in $className")
+        Logger.i(TAG, "Hooked $hooked passive game ad diagnostic method(s) in $className")
     }
 }
 
@@ -4089,8 +4065,8 @@ private fun logGameAdDiagnostic(event: String, detail: String) {
 
     val count = gameAdDiagnosticLogCount.incrementAndGet()
     when {
-        count <= GAME_AD_DIAG_LOG_LIMIT -> Log.i(TAG, "GADIAG[$count] $event ${truncateDiag(detail)}")
-        count == GAME_AD_DIAG_LOG_LIMIT + 1 -> Log.i(TAG, "GADIAG log limit reached; suppressing further diagnostics")
+        count <= GAME_AD_DIAG_LOG_LIMIT -> Logger.i(TAG, "GADIAG[$count] $event ${truncateDiag(detail)}")
+        count == GAME_AD_DIAG_LOG_LIMIT + 1 -> Logger.i(TAG, "GADIAG log limit reached; suppressing further diagnostics")
     }
 }
 
@@ -4314,7 +4290,7 @@ private fun hookAudienceNetworkRewardFallbacks(classLoader: ClassLoader) {
             })
         }
 
-    Log.i(TAG, "Hooked Audience Network reward dynamic class fallback")
+    Logger.i(TAG, "Hooked Audience Network reward dynamic class fallback")
 }
 
 private fun tryHookAudienceNetworkRewardClass(clazz: Class<*>) {
@@ -4355,7 +4331,7 @@ private fun tryHookAudienceNetworkRewardClass(clazz: Class<*>) {
                             Boolean::class.javaPrimitiveType, Boolean::class.java -> true
                             else -> null
                         }
-                        Log.i(TAG, "Skipped Audience Network rewarded show via ${method.declaringClass.name}.${method.name}")
+                        Logger.i(TAG, "Skipped Audience Network rewarded show via ${method.declaringClass.name}.${method.name}")
                     }
 
                     override fun afterHookedMethod(param: MethodHookParam) {
@@ -4407,12 +4383,12 @@ private fun tryHookAudienceNetworkRewardClass(clazz: Class<*>) {
                 hooked++
             }
         }.onFailure {
-            Log.w(TAG, "Failed to hook Audience Network reward method ${clazz.name}.${method.name}", it)
+            Logger.w(TAG, "Failed to hook Audience Network reward method ${clazz.name}.${method.name}", it)
         }
     }
 
     if (hooked > 0) {
-        Log.i(TAG, "Hooked $hooked Audience Network reward method(s) in $className")
+        Logger.i(TAG, "Hooked $hooked Audience Network reward method(s) in $className")
     }
 }
 
@@ -4463,14 +4439,14 @@ private fun rememberAudienceNetworkRewardListeners(owner: Any?, args: Array<Any?
     args.forEach { arg ->
         if (arg != null && isAudienceNetworkRewardListenerObject(arg)) {
             audienceNetworkRewardAdListeners[owner] = arg
-            Log.i(
+            Logger.i(
                 TAG,
                 "Remembered Audience Network reward listener ${arg.javaClass.name} from ${method.declaringClass.name}.${method.name}"
             )
         } else {
             findAudienceNetworkRewardListeners(arg).firstOrNull()?.let { listener ->
                 audienceNetworkRewardAdListeners[owner] = listener
-                Log.i(
+                Logger.i(
                     TAG,
                     "Remembered nested Audience Network reward listener ${listener.javaClass.name} from ${method.declaringClass.name}.${method.name}"
                 )
@@ -4527,12 +4503,12 @@ private fun completeAudienceNetworkRewardObject(adObject: Any, source: String): 
     }
 
     if (invoked > 0) {
-        Log.i(TAG, "Completed Audience Network reward callbacks invoked=$invoked listeners=${listeners.size} via $source")
+        Logger.i(TAG, "Completed Audience Network reward callbacks invoked=$invoked listeners=${listeners.size} via $source")
         completeRecentGameAdRequests(source)
         return true
     }
 
-    Log.w(TAG, "No Audience Network reward listener completed for ${adObject.javaClass.name} via $source")
+    Logger.w(TAG, "No Audience Network reward listener completed for ${adObject.javaClass.name} via $source")
     return false
 }
 
@@ -4607,12 +4583,12 @@ private fun invokeAudienceNetworkRewardListenerCallbacks(listener: Any, adObject
                 runCatching {
                     method.invoke(listener, *args)
                     invoked++
-                    Log.i(
+                    Logger.i(
                         TAG,
                         "Invoked Audience Network callback ${listener.javaClass.name}.${method.name} via $source"
                     )
                 }.onFailure {
-                    Log.w(TAG, "Failed Audience Network callback ${listener.javaClass.name}.${method.name}", it)
+                    Logger.w(TAG, "Failed Audience Network callback ${listener.javaClass.name}.${method.name}", it)
                 }
             }
     }
@@ -4667,7 +4643,7 @@ private fun dispatchPostResolveGameAdSignals(target: Any?, payload: Any?, messag
         "loadbanneradasync", "hidebanneradasync" -> {
             val content = buildGameAdSuccessPayload(payload, messageType)
             if (dispatchGameEvent(target, "hidebannerad", content)) {
-                Log.i(TAG, "Dispatched hidebannerad for game banner message type=$messageType")
+                Logger.i(TAG, "Dispatched hidebannerad for game banner message type=$messageType")
             }
         }
     }
@@ -4725,7 +4701,7 @@ private fun completeRecentGameAdRequests(source: String) {
     }
 
     if (resolved > 0) {
-        Log.i(TAG, "Re-resolved $resolved recent game ad request(s) via $source")
+        Logger.i(TAG, "Re-resolved $resolved recent game ad request(s) via $source")
     }
 }
 
@@ -4757,12 +4733,12 @@ private fun rejectUnavailableGameAdPayloadIfNeeded(
             GAME_AD_UNAVAILABLE_CODE
         )
     ) {
-        Log.w(TAG, "Unable to mark rewarded game ad unavailable via $source type=$messageType")
+        Logger.w(TAG, "Unable to mark rewarded game ad unavailable via $source type=$messageType")
         return false
     }
 
     lastUnavailableGameAdMs.set(System.currentTimeMillis())
-    Log.i(TAG, "Marked rewarded game ad unavailable via $source type=$messageType")
+    Logger.i(TAG, "Marked rewarded game ad unavailable via $source type=$messageType")
     return true
 }
 
@@ -4849,7 +4825,7 @@ private fun hookGlobalGameAdActivityLifecycleFallback() {
         }
     })
 
-    Log.i(TAG, "Hooked global game ad activity lifecycle fallback")
+    Logger.i(TAG, "Hooked global game ad activity lifecycle fallback")
 }
 
 private fun hookGameAdActivityLaunchFallbacks() {
@@ -4880,10 +4856,10 @@ private fun hookGameAdActivityLaunchFallbacks() {
             hookGameAdActivityLaunchMethod(method)
             hooked++
         }.onFailure {
-            Log.w(TAG, "Failed to hook game ad launch fallback ${method.declaringClass.name}.${method.name}", it)
+            Logger.w(TAG, "Failed to hook game ad launch fallback ${method.declaringClass.name}.${method.name}", it)
         }
     }
-    Log.i(TAG, "Hooked $hooked game ad activity launch fallback method(s)")
+    Logger.i(TAG, "Hooked $hooked game ad activity launch fallback method(s)")
 }
 
 private fun hookGameAdActivityLaunchMethod(method: Method) {
@@ -4904,7 +4880,7 @@ private fun hookGameAdActivityLaunchMethod(method: Method) {
             } else {
                 param.result = null
             }
-            Log.i(
+            Logger.i(
                 TAG,
                 "Blocked game ad activity launch to $blockedClassName via ${method.declaringClass.name}.${method.name}"
             )
@@ -4979,11 +4955,11 @@ private fun scheduleAudienceNetworkRewardClose(activity: Activity, source: Strin
 
     val root = activity.window?.decorView
     if (root == null) {
-        Log.i(TAG, "Audience Network reward close skipped; missing decor via $source")
+        Logger.i(TAG, "Audience Network reward close skipped; missing decor via $source")
         return
     }
 
-    Log.i(
+    Logger.i(
         TAG,
         "Scheduled Audience Network reward close autoclick for ${activity.javaClass.name} via $source"
     )
@@ -5002,7 +4978,7 @@ private fun scheduleAudienceNetworkRewardClose(activity: Activity, source: Strin
             if (activity.isFinishing) return@postDelayed
             val clicked = clickLikelyAudienceNetworkCloseButton(activity, "$source delay=${delayMs}ms")
             if (!clicked) {
-                Log.i(TAG, "Audience Network close button not ready after ${delayMs}ms via $source")
+                Logger.i(TAG, "Audience Network close button not ready after ${delayMs}ms via $source")
             }
         }, delayMs)
     }
@@ -5016,7 +4992,7 @@ private fun clickLikelyAudienceNetworkCloseButton(activity: Activity, source: St
         val clicked = runCatching { view.performClick() }.getOrDefault(false)
         if (clicked) {
             lastGameAdActivityCloseMs.set(System.currentTimeMillis())
-            Log.i(TAG, "Clicked Audience Network close candidate ${view.javaClass.name} via $source")
+            Logger.i(TAG, "Clicked Audience Network close candidate ${view.javaClass.name} via $source")
             return true
         }
     }
@@ -5107,7 +5083,7 @@ private fun finishGameAdActivity(activity: Activity, source: String) {
         activity.setResult(Activity.RESULT_CANCELED, Intent())
     }
     activity.finish()
-    Log.i(TAG, "Closed game ad activity ${activity.javaClass.name} via $source")
+    Logger.i(TAG, "Closed game ad activity ${activity.javaClass.name} via $source")
 }
 
 private fun buildGameAdActivityResultIntent(): Intent {
@@ -5150,7 +5126,7 @@ private fun forceAudienceNetworkRewardCompletion(activity: Activity, source: Str
         }
     }
 
-    Log.i(TAG, "Forced Audience Network reward callbacks invoked=$invoked inspected=$inspected via $source")
+    Logger.i(TAG, "Forced Audience Network reward callbacks invoked=$invoked inspected=$inspected via $source")
 }
 
 private fun invokeAudienceNetworkRewardCompletionMethods(target: Any): Int {
@@ -5170,7 +5146,7 @@ private fun invokeAudienceNetworkRewardCompletionMethods(target: Any): Int {
                 method.invoke(target)
                 invoked++
             }.onFailure {
-                Log.w(TAG, "Failed to invoke Audience Network reward callback ${target.javaClass.name}.${method.name}", it)
+                Logger.w(TAG, "Failed to invoke Audience Network reward callback ${target.javaClass.name}.${method.name}", it)
             }
         }
     return invoked
@@ -5357,7 +5333,7 @@ private fun hookGlobalGameAdSurfaceFallbacks() {
             hooked++
         }
 
-    Log.i(TAG, "Hooked $hooked global ad surface fallback method(s)")
+    Logger.i(TAG, "Hooked $hooked global ad surface fallback method(s)")
 }
 
 private fun scheduleGameAdSurfaceSweep(view: View?, reason: String) {
@@ -5420,7 +5396,7 @@ private fun hideLikelyAdContainer(view: View, reason: String): Boolean {
     val target =
         if (shouldUseExplicitFeedMarkerCardTarget(view)) {
             resolveLikelyExplicitFeedAdCardTarget(view) ?: run {
-                Log.i(
+                Logger.i(
                     TAG,
                     "Skipped explicit feed ad hide via $reason because no safe full-card target was found"
                 )
@@ -5428,7 +5404,7 @@ private fun hideLikelyAdContainer(view: View, reason: String): Boolean {
             }
         } else if (shouldUseFeedMarkerCardTarget(view)) {
             resolveLikelyFeedMarkerCardTarget(view) ?: run {
-                Log.i(
+                Logger.i(
                     TAG,
                     "Skipped feed marker hide via $reason because no safe full-card target was found"
                 )
@@ -5487,7 +5463,7 @@ private fun hideResolvedAdSurfaceTarget(
     target.requestLayout()
 
     if (hidden) {
-        Log.i(
+        Logger.i(
             TAG,
             "Hid ad surface via $reason target=${target.javaClass.name} bounds=${target.left},${target.top},${target.right},${target.bottom}"
         )
@@ -5502,7 +5478,7 @@ private fun traceSurvivingFeedAdSourceOnce(source: View, target: View, reason: S
         .plus(collectViewMarkerTexts(target))
         .distinct()
         .joinToString(" | ") { it.take(240) }
-    Log.i(
+    Logger.i(
         TAG,
         "SurvivingFeedAdTrace reason=$reason source=${source.javaClass.name} " +
             "target=${target.javaClass.name} markers=$markerTexts"
@@ -5517,7 +5493,7 @@ private fun traceSurvivingFeedAdSourceOnce(source: View, target: View, reason: S
         }
         .take(48)
         .forEachIndexed { index, frame ->
-            Log.i(TAG, "SurvivingFeedAdTrace stack[$index]=$frame")
+            Logger.i(TAG, "SurvivingFeedAdTrace stack[$index]=$frame")
         }
 
     val classLoader = target.javaClass.classLoader ?: source.javaClass.classLoader ?: return
@@ -5550,7 +5526,7 @@ private fun hideLikelyFeedReelCtaAdContainer(view: View, reason: String): Boolea
     target.requestLayout()
 
     if (hidden) {
-        Log.i(
+        Logger.i(
             TAG,
             "Hid ad surface via $reason reelCtaTarget=${target.javaClass.name} bounds=${target.left},${target.top},${target.right},${target.bottom}"
         )
@@ -5943,13 +5919,13 @@ private fun resolveGameAdPayload(target: Any?, payload: Any?, messageType: Strin
 
     val promiseId = extractPromiseId(payload)
     if (promiseId == null) {
-        Log.w(TAG, "Unable to extract promiseID for resolved game ad payload")
+        Logger.w(TAG, "Unable to extract promiseID for resolved game ad payload")
         return false
     }
 
     val resolveMethod = resolveGameAdResolveMethod(target.javaClass)
     if (resolveMethod == null) {
-        Log.w(TAG, "Unable to resolve success helper for resolved game ad payload")
+        Logger.w(TAG, "Unable to resolve success helper for resolved game ad payload")
         return false
     }
 
@@ -5958,7 +5934,7 @@ private fun resolveGameAdPayload(target: Any?, payload: Any?, messageType: Strin
         resolveMethod.invoke(target, promiseId, successPayload)
         true
     }.getOrElse {
-        Log.e(TAG, "Failed to resolve game ad payload", it)
+        Logger.e(TAG, "Failed to resolve game ad payload", it)
         false
     }
 }
@@ -5977,7 +5953,7 @@ private fun rejectGameAdPayload(
             bridgeRejectMethod.invoke(target, message, code, payload)
             true
         }.getOrElse {
-            Log.e(TAG, "Failed to reject game ad payload via bridge reject helper", it)
+            Logger.e(TAG, "Failed to reject game ad payload via bridge reject helper", it)
             false
         }
         if (success) {
@@ -5987,12 +5963,12 @@ private fun rejectGameAdPayload(
 
     val promiseId = extractPromiseId(payload)
     if (promiseId == null) {
-        Log.w(TAG, "Unable to extract promiseID for rejected game ad payload")
+        Logger.w(TAG, "Unable to extract promiseID for rejected game ad payload")
         return false
     }
     val rejectMethod = resolveGameAdRejectMethod(target.javaClass)
     if (rejectMethod == null) {
-        Log.w(TAG, "Unable to resolve reject helper for rejected game ad payload")
+        Logger.w(TAG, "Unable to resolve reject helper for rejected game ad payload")
         return false
     }
     return runCatching {
@@ -6004,7 +5980,7 @@ private fun rejectGameAdPayload(
         )
         true
     }.getOrElse {
-        Log.e(TAG, "Failed to reject game ad payload", it)
+        Logger.e(TAG, "Failed to reject game ad payload", it)
         false
     }
 }
@@ -6057,7 +6033,7 @@ private fun dispatchGameEvent(target: Any?, eventType: String, content: Any?): B
         dispatchMethod.invoke(target, eventValue, content ?: JSONObject.NULL)
         true
     }.getOrElse {
-        Log.w(TAG, "Failed to dispatch game event type=$eventType", it)
+        Logger.w(TAG, "Failed to dispatch game event type=$eventType", it)
         false
     }
 }
@@ -6266,7 +6242,7 @@ private fun hookSponsoredStoryNext(method: Method) {
     XposedBridge.hookMethod(method, object : XC_MethodHook() {
         override fun beforeHookedMethod(param: MethodHookParam) {
             param.result = null
-            Log.i(TAG, "Blocked sponsored story vending from feed manager")
+            Logger.i(TAG, "Blocked sponsored story vending from feed manager")
         }
     })
 }
@@ -6289,7 +6265,7 @@ private fun hookSponsoredStoryListMethods(managerClass: Class<*>) {
             })
             hooked++
         }
-    Log.i(TAG, "Hooked $hooked sponsored story list method(s) on ${managerClass.name}")
+    Logger.i(TAG, "Hooked $hooked sponsored story list method(s) on ${managerClass.name}")
 }
 
 private fun isSponsoredStoryListMethod(method: Method): Boolean {
@@ -6327,7 +6303,7 @@ private fun hookStoryAdsMerge(method: Method, source: String) {
             val originalBuckets = param.args.getOrNull(2)
             if (originalBuckets != null) {
                 param.result = originalBuckets
-                Log.i(TAG, "Blocked story ad bucket merge in $source")
+                Logger.i(TAG, "Blocked story ad bucket merge in $source")
             }
         }
     })
@@ -6337,7 +6313,7 @@ private fun hookStoryAdsNoOp(method: Method, reason: String, source: String) {
     XposedBridge.hookMethod(method, object : XC_MethodHook() {
         override fun beforeHookedMethod(param: MethodHookParam) {
             param.result = null
-            Log.i(TAG, "Blocked $reason in $source")
+            Logger.i(TAG, "Blocked $reason in $source")
         }
     })
 }
@@ -6365,7 +6341,7 @@ private fun hookStoryAdProvider(provider: StoryAdProviderHooks) {
     }
 
     if (hooked.isNotEmpty()) {
-        Log.i(TAG, "Hooked story ad provider ${provider.providerClass.name}: ${hooked.joinToString()}")
+        Logger.i(TAG, "Hooked story ad provider ${provider.providerClass.name}: ${hooked.joinToString()}")
     }
 }
 
@@ -6386,7 +6362,7 @@ private fun hookSponsoredPoolListMethods(poolClass: Class<*>) {
             })
             hooked++
         }
-    Log.i(TAG, "Hooked $hooked feed pool list method(s) on ${poolClass.name}")
+    Logger.i(TAG, "Hooked $hooked feed pool list method(s) on ${poolClass.name}")
 }
 
 private fun hookSponsoredPoolResultMethods(poolClass: Class<*>) {
@@ -6411,7 +6387,7 @@ private fun hookSponsoredPoolResultMethods(poolClass: Class<*>) {
             })
             hooked++
         }
-    Log.i(TAG, "Hooked $hooked feed pool result method(s) on ${poolClass.name}")
+    Logger.i(TAG, "Hooked $hooked feed pool result method(s) on ${poolClass.name}")
 }
 
 private fun isSponsoredResultCarrier(type: Class<*>): Boolean {
@@ -6516,8 +6492,8 @@ private fun extractFeedItemsFromResult(result: Any?): Iterable<*>? {
 private fun logFeedItems(source: String, items: Iterable<*>, feedItemInspector: FeedItemInspector) {
     var index = 0
     for (item in items) {
-        Log.i(TAG, "FeedItem $source[$index] ${feedItemInspector.describe(item)}")
+        Logger.i(TAG, "FeedItem $source[$index] ${feedItemInspector.describe(item)}")
         index++
     }
-    Log.i(TAG, "FeedItem $source count=$index")
+    Logger.i(TAG, "FeedItem $source count=$index")
 }
