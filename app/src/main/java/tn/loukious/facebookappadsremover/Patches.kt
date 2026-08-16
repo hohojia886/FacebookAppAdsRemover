@@ -89,12 +89,12 @@ private const val GAME_AD_WEBVIEW_HIDE_SCRIPT = """
     } catch (e) { return false; }
   }
   function isAd(el) {
-    var t = textOf(el);
     var a = attrsOf(el);
-    if (t.indexOf('ads served by meta') >= 0 || t.indexOf('ad choices') >= 0) return true;
+    if (/audiencenetwork|adchoices|fbinstant.*ad|instant.*ad|banner.?ad|ad.?banner|ad-container|ad_container|sponsored/.test(a)) return true;
     if (!nearBottom(el)) return false;
-    if ((el.tagName || '').toLowerCase() === 'iframe') return true;
-    return /audiencenetwork|adchoices|fbinstant.*ad|instant.*ad|banner.?ad|ad.?banner|ad-container|ad_container|sponsored/.test(a);
+    if (el.tagName === 'IFRAME') return true;
+    var t = textOf(el);
+    return t.indexOf('ads served by meta') >= 0 || t.indexOf('ad choices') >= 0;
   }
   function hide(el) {
     try {
@@ -107,16 +107,20 @@ private const val GAME_AD_WEBVIEW_HIDE_SCRIPT = """
       target.style.setProperty('pointer-events', 'none', 'important');
     } catch (e) {}
   }
+  var sweepTimer = null;
   function sweep() {
-    try {
-      document.querySelectorAll('iframe, div, section, aside, [id], [class], [aria-label]').forEach(function(el) {
-        if (isAd(el)) hide(el);
-      });
-    } catch (e) {}
+    if (sweepTimer) clearTimeout(sweepTimer);
+    sweepTimer = setTimeout(function() {
+      try {
+        document.querySelectorAll('iframe, [id*="ad"], [class*="ad"], [id*="sponsored"], [class*="sponsored"], [aria-label*="ad"]').forEach(function(el) {
+          if (isAd(el)) hide(el);
+        });
+      } catch (e) {}
+    }, 150);
   }
   sweep();
-  new MutationObserver(sweep).observe(document.documentElement || document.body, {childList:true, subtree:true, attributes:true});
-  setInterval(sweep, 1000);
+  var observer = new MutationObserver(sweep);
+  observer.observe(document.documentElement || document.body, {childList:true, subtree:true, attributes:true, attributeFilter:['id', 'class', 'aria-label']});
 })();
 """
 
@@ -180,6 +184,13 @@ private val gameAdInstanceTypes = ConcurrentHashMap<String, String>()
 private val gameAdPromiseSnapshots = ConcurrentHashMap<String, GameAdPromiseSnapshot>()
 private val recentGameAdTargets = Collections.synchronizedMap(WeakHashMap<Any, Long>())
 private val recentGameAdPayloads = Collections.synchronizedList(ArrayList<GameAdPayloadSnapshot>())
+
+private val hierarchyMethodCache = ConcurrentHashMap<Class<*>, List<Method>>()
+private val instanceMethodCache = ConcurrentHashMap<Class<*>, List<Method>>()
+private val hierarchyFieldCache = ConcurrentHashMap<Class<*>, List<Field>>()
+private val interfaceCache = ConcurrentHashMap<Class<*>, List<Class<*>>>()
+private val sweepPendingRoots = Collections.synchronizedMap(WeakHashMap<View, Long>())
+
 private val hookHitCounters = ConcurrentHashMap<String, AtomicInteger>()
 private val gameAdSurfaceHooksInstalled = AtomicInteger(0)
 private val gameAdResultHooksInstalled = AtomicInteger(0)
@@ -405,6 +416,7 @@ private class AdStoryInspector(
 ) {
     private val enumMethodCache = ConcurrentHashMap<Class<*>, List<Method>>()
     private val fieldCache = ConcurrentHashMap<Class<*>, List<Field>>()
+    private val allMethodsCache = ConcurrentHashMap<Class<*>, List<Method>>()
 
     fun containsAdStory(
         value: Any?,
@@ -578,18 +590,20 @@ private class AdStoryInspector(
     }
 
     private fun allMethodsFor(type: Class<*>): List<Method> {
-        val methods = LinkedHashMap<String, Method>()
-        var current: Class<*>? = type
-        while (current != null && current != Any::class.java) {
-            current.declaredMethods.forEach { method ->
-                if (!Modifier.isStatic(method.modifiers)) {
-                    method.isAccessible = true
-                    methods.putIfAbsent("${current.name}#${method.name}/${method.parameterCount}", method)
+        return allMethodsCache.getOrPut(type) {
+            val methods = LinkedHashMap<String, Method>()
+            var current: Class<*>? = type
+            while (current != null && current != Any::class.java) {
+                current.declaredMethods.forEach { method ->
+                    if (!Modifier.isStatic(method.modifiers)) {
+                        method.isAccessible = true
+                        methods.putIfAbsent("${current.name}#${method.name}/${method.parameterCount}", method)
+                    }
                 }
+                current = current.superclass
             }
-            current = current.superclass
+            methods.values.toList()
         }
-        return methods.values.toList()
     }
 
     private fun isReelsAdSignalText(value: String?): Boolean {
@@ -1016,26 +1030,28 @@ private class FeedItemInspector(
     }
 
     private fun allInstanceMethods(type: Class<*>): List<Method> {
-        val methods = LinkedHashMap<String, Method>()
-        var current: Class<*>? = type
-        while (current != null && current != Any::class.java) {
-            current.declaredMethods.forEach { method ->
-                if (!Modifier.isStatic(method.modifiers)) {
-                    method.isAccessible = true
-                    methods.putIfAbsent("${current.name}#${method.name}/${method.parameterCount}", method)
-                }
-            }
-            current.interfaces.forEach { iface ->
-                iface.declaredMethods.forEach { method ->
+        return instanceMethodCache.getOrPut(type) {
+            val methods = LinkedHashMap<String, Method>()
+            var current: Class<*>? = type
+            while (current != null && current != Any::class.java) {
+                current.declaredMethods.forEach { method ->
                     if (!Modifier.isStatic(method.modifiers)) {
                         method.isAccessible = true
-                        methods.putIfAbsent("${iface.name}#${method.name}/${method.parameterCount}", method)
+                        methods.putIfAbsent("${method.name}/${method.parameterCount}", method)
                     }
                 }
+                current.interfaces.forEach { iface ->
+                    iface.declaredMethods.forEach { method ->
+                        if (!Modifier.isStatic(method.modifiers)) {
+                            method.isAccessible = true
+                            methods.putIfAbsent("${method.name}/${method.parameterCount}", method)
+                        }
+                    }
+                }
+                current = current.superclass
             }
-            current = current.superclass
+            methods.values.toList()
         }
-        return methods.values.toList()
     }
 
     private fun invokeNoThrow(method: Method?, target: Any?): Any? {
@@ -2025,19 +2041,21 @@ private fun isTraceableFeedObject(type: Class<*>): Boolean {
 }
 
 private fun allInterfacesInHierarchy(type: Class<*>): List<Class<*>> {
-    val result = LinkedHashMap<String, Class<*>>()
-    val queue = ArrayDeque<Class<*>>()
-    queue.add(type)
-    while (queue.isNotEmpty()) {
-        val current = queue.removeFirst()
-        current.interfaces.forEach { iface ->
-            if (result.putIfAbsent(iface.name, iface) == null) {
-                queue.add(iface)
+    return interfaceCache.getOrPut(type) {
+        val result = LinkedHashMap<String, Class<*>>()
+        val queue = ArrayDeque<Class<*>>()
+        queue.add(type)
+        while (queue.isNotEmpty()) {
+            val current = queue.removeFirst()
+            current.interfaces.forEach { iface ->
+                if (result.putIfAbsent(iface.name, iface) == null) {
+                    queue.add(iface)
+                }
             }
+            current.superclass?.let(queue::add)
         }
-        current.superclass?.let(queue::add)
+        result.values.toList()
     }
-    return result.values.toList()
 }
 
 private fun shouldSkipVisibleAdTraceType(type: Class<*>): Boolean {
@@ -2071,28 +2089,32 @@ private fun isVisibleAdTraceString(value: String): Boolean {
 }
 
 private fun allFieldsInHierarchy(type: Class<*>): List<Field> {
-    val fields = ArrayList<Field>()
-    var current: Class<*>? = type
-    while (current != null && current != Any::class.java && fields.size < 200) {
-        fields.addAll(current.declaredFields)
-        current = current.superclass
+    return hierarchyFieldCache.getOrPut(type) {
+        val fields = ArrayList<Field>()
+        var current: Class<*>? = type
+        while (current != null && current != Any::class.java && fields.size < 200) {
+            fields.addAll(current.declaredFields)
+            current = current.superclass
+        }
+        fields
     }
-    return fields
 }
 
 private fun allMethodsInHierarchy(type: Class<*>): List<Method> {
-    val methods = LinkedHashMap<String, Method>()
-    var current: Class<*>? = type
-    while (current != null && current != Any::class.java) {
-        current.declaredMethods.forEach { method ->
-            methods.putIfAbsent(
-                "${method.name}:${method.parameterTypes.joinToString { it.name }}",
-                method
-            )
+    return hierarchyMethodCache.getOrPut(type) {
+        val methods = LinkedHashMap<String, Method>()
+        var current: Class<*>? = type
+        while (current != null && current != Any::class.java) {
+            current.declaredMethods.forEach { method ->
+                methods.putIfAbsent(
+                    "${method.name}:${method.parameterTypes.joinToString { it.name }}",
+                    method
+                )
+            }
+            current = current.superclass
         }
-        current = current.superclass
+        methods.values.toList()
     }
-    return methods.values.toList()
 }
 
 private fun installFacebook571FeedResponseFastPath(classLoader: ClassLoader): Boolean {
@@ -5338,6 +5360,11 @@ private fun hookGlobalGameAdSurfaceFallbacks() {
 
 private fun scheduleGameAdSurfaceSweep(view: View?, reason: String) {
     val root = view?.rootView ?: view ?: return
+    val now = System.currentTimeMillis()
+    val lastScheduled = sweepPendingRoots[root] ?: 0L
+    if (now - lastScheduled < 150L) return
+    sweepPendingRoots[root] = now
+
     longArrayOf(0L, 250L, 1_000L, 2_500L, 5_000L).forEach { delayMs ->
         root.postDelayed({
             sweepGameAdSurface(root, reason)
@@ -6135,6 +6162,7 @@ private fun buildGameAdSuccessPayload(payload: Any?, messageType: String? = null
 
     val adInstanceId = when {
         requestedAdInstanceId != null -> {
+            cleanupGameAdIdCaches()
             gameAdInstanceIds.putIfAbsent(requestedAdInstanceId, requestedAdInstanceId)
             requestedAdInstanceId
         }
@@ -6146,11 +6174,21 @@ private fun buildGameAdSuccessPayload(payload: Any?, messageType: String? = null
     if (adInstanceId != null) {
         result.put("adInstanceID", adInstanceId)
         effectiveMessageType.takeIf { it.isNotBlank() }?.let { type ->
+            cleanupGameAdIdCaches()
             gameAdInstanceTypes.putIfAbsent(adInstanceId, type)
         }
     }
 
     return result
+}
+
+private fun cleanupGameAdIdCaches() {
+    if (gameAdInstanceIds.size > 200) {
+        gameAdInstanceIds.clear()
+    }
+    if (gameAdInstanceTypes.size > 200) {
+        gameAdInstanceTypes.clear()
+    }
 }
 
 private fun forceGameAdSuccessResult(
