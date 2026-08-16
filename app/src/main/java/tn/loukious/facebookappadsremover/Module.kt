@@ -2,7 +2,6 @@ package tn.loukious.facebookappadsremover
 
 import android.app.Application
 import android.content.Context
-import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import de.robv.android.xposed.IXposedHookLoadPackage
@@ -10,6 +9,8 @@ import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.callbacks.XC_LoadPackage
 import org.luckypray.dexkit.DexKitBridge
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 class Module : IXposedHookLoadPackage {
@@ -40,6 +41,10 @@ class Module : IXposedHookLoadPackage {
 
         @Volatile
         private var sClassLoadNotifierUnhook: XC_MethodHook.Unhook? = null
+
+        private val sTaskExecutor = Executors.newSingleThreadScheduledExecutor { runnable ->
+            Thread(runnable, "FacebookAdsHookExecutor")
+        }
 
         @JvmStatic
         private fun initModule(lpparam: XC_LoadPackage.LoadPackageParam) {
@@ -196,35 +201,28 @@ class Module : IXposedHookLoadPackage {
         }
 
         private fun scheduleHookInstallAttempts(classLoader: ClassLoader) {
-            val handler = Handler(Looper.getMainLooper())
             tryInstallFastFeedSourceHooks(classLoader, 0)
             tryInstallFeedComponentGuard(classLoader, "Application.attach")
 
             FAST_SOURCE_DELAYS_MS.forEachIndexed { index, delay ->
                 val attemptNumber = index + 1
-                handler.postDelayed({
-                    Thread({
-                        tryInstallFastFeedSourceHooks(classLoader, attemptNumber)
-                    }, "FacebookFeedFastInit-$attemptNumber").start()
-                }, delay)
+                sTaskExecutor.schedule({
+                    tryInstallFastFeedSourceHooks(classLoader, attemptNumber)
+                }, delay, TimeUnit.MILLISECONDS)
             }
 
             FAST_COMPONENT_DELAYS_MS.forEachIndexed { index, delay ->
                 val attemptNumber = index + 1
-                handler.postDelayed({
-                    Thread({
-                        tryInstallFeedComponentGuard(classLoader, "component attempt=$attemptNumber")
-                    }, "FacebookFeedComponentInit-$attemptNumber").start()
-                }, delay)
+                sTaskExecutor.schedule({
+                    tryInstallFeedComponentGuard(classLoader, "component attempt=$attemptNumber")
+                }, delay, TimeUnit.MILLISECONDS)
             }
 
             INSTALL_DELAYS_MS.forEachIndexed { index, delay ->
                 val attemptNumber = index + 1
-                handler.postDelayed({
-                    Thread({
-                        tryInstallHooks(classLoader, attemptNumber)
-                    }, "FacebookAdsHookInit-$attemptNumber").start()
-                }, delay)
+                sTaskExecutor.schedule({
+                    tryInstallHooks(classLoader, attemptNumber)
+                }, delay, TimeUnit.MILLISECONDS)
             }
         }
 

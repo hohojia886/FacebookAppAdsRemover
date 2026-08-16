@@ -3,7 +3,7 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <application
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"
@@ -19,7 +19,13 @@
             android:value="An Xposed module that removes ads from the Facebook app." />
         <meta-data
             android:name="xposedminversion"
-            android:value="101" />
+            android:value="93" />
+        <meta-data
+            android:name="xposedsharedprefs"
+            android:value="false" />
+        <meta-data
+            android:name="xposedscope"
+            android:value="com.facebook.katana" />
 
     </application>
 
