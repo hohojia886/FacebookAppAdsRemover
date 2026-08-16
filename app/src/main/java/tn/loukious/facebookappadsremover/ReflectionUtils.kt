@@ -90,6 +90,7 @@ internal fun invokeMethodByName(target: Any?, methodName: String, vararg args: A
 }
 
 internal fun allInterfacesInHierarchy(type: Class<*>): List<Class<*>> {
+    if (interfaceCache.size > 1000) interfaceCache.clear()
     return interfaceCache.getOrPut(type) {
         val result = LinkedHashMap<String, Class<*>>()
         val queue = ArrayDeque<Class<*>>()
@@ -108,10 +109,11 @@ internal fun allInterfacesInHierarchy(type: Class<*>): List<Class<*>> {
 }
 
 internal fun allFieldsInHierarchy(type: Class<*>): List<Field> {
+    if (hierarchyFieldCache.size > 1000) hierarchyFieldCache.clear()
     return hierarchyFieldCache.getOrPut(type) {
         val fields = ArrayList<Field>()
         var current: Class<*>? = type
-        while (current != null && current != Any::class.java && fields.size < 200) {
+        while (current != null && current != Any::class.java && isNonStandardClass(current) && fields.size < 200) {
             fields.addAll(current.declaredFields)
             current = current.superclass
         }
@@ -120,10 +122,11 @@ internal fun allFieldsInHierarchy(type: Class<*>): List<Field> {
 }
 
 internal fun allMethodsInHierarchy(type: Class<*>): List<Method> {
+    if (hierarchyMethodCache.size > 1000) hierarchyMethodCache.clear()
     return hierarchyMethodCache.getOrPut(type) {
         val methods = LinkedHashMap<String, Method>()
         var current: Class<*>? = type
-        while (current != null && current != Any::class.java) {
+        while (current != null && current != Any::class.java && isNonStandardClass(current)) {
             current.declaredMethods.forEach { method ->
                 methods.putIfAbsent(
                     "${method.name}:${method.parameterTypes.joinToString { it.name }}",
@@ -170,6 +173,18 @@ internal fun isFeedListType(type: Class<*>): Boolean {
 
 internal fun methodSignature(method: Method): String {
     return "${method.declaringClass.name}.${method.name}(${method.parameterTypes.joinToString(",") { it.name }}):${method.returnType.name}"
+}
+
+internal fun isNonStandardClass(type: Class<*>): Boolean {
+    val name = type.name
+    return !name.startsWith("java.") &&
+        !name.startsWith("android.") &&
+        !name.startsWith("kotlin.") &&
+        !name.startsWith("androidx.") &&
+        !name.startsWith("com.android.") &&
+        !name.startsWith("javax.") &&
+        !name.startsWith("dalvik.") &&
+        !name.startsWith("libcore.")
 }
 
 internal fun messagePeekData(message: android.os.Message): android.os.Bundle? {

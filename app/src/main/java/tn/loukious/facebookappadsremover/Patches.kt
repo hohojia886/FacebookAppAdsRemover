@@ -12,8 +12,8 @@ import android.view.View
 import android.view.ViewGroup
 import android.webkit.WebView
 import android.widget.TextView
-import de.robv.android.xposed.XC_MethodHook
-import de.robv.android.xposed.XposedBridge
+import io.github.libxposed.api.XposedModule
+import io.github.libxposed.api.XposedInterface
 import org.luckypray.dexkit.DexKitBridge
 import org.luckypray.dexkit.query.enums.MatchType
 import org.luckypray.dexkit.query.enums.StringMatchType
@@ -132,7 +132,7 @@ internal fun injectGameAdHidingScript(webView: WebView) {
     }
 }
 
-fun installFacebookAdRemover(classLoader: ClassLoader, bridge: DexKitBridge): Boolean {
+fun installFacebookAdRemover(module: XposedModule, classLoader: ClassLoader, bridge: DexKitBridge): Boolean {
     return try {
         Logger.i(TAG, "Starting hook install: $BUILD_MARKER")
         val hooks = resolveProjectHooks(classLoader, bridge)
@@ -140,7 +140,7 @@ fun installFacebookAdRemover(classLoader: ClassLoader, bridge: DexKitBridge): Bo
             Logger.w(TAG, "Facebook secondary dex targets are not loaded yet; deferring hook installation")
             return false
         }
-        installFacebook571FeedComponentGuard(classLoader)
+        installFacebook571FeedComponentGuard(module, classLoader)
         val feedItemInspector = FeedItemInspector(hooks.storyPoolAddMethods.map { it.parameterTypes[0] })
         Logger.i(TAG, "FeedItemInspector accessors ${feedItemInspector.describeAccessors()}")
 
@@ -150,18 +150,18 @@ fun installFacebookAdRemover(classLoader: ClassLoader, bridge: DexKitBridge): Bo
             hooks.listBuilderAppendMethod != null
         ) {
             val inspector = AdStoryInspector(hooks.adKindEnumClass)
-            hookListBuilderAppend(hooks.listBuilderAppendMethod, inspector)
-            hooks.listBuilderFactoryMethod?.let { hookListResultFilter(it, "list factory", inspector) }
-            hooks.pluginPackBuildMethods.forEach { hookPluginPackFallback(it, inspector) }
+            hookListBuilderAppend(module, hooks.listBuilderAppendMethod, inspector)
+            hooks.listBuilderFactoryMethod?.let { hookListResultFilter(module, it, "list factory", inspector) }
+            hooks.pluginPackBuildMethods.forEach { hookPluginPackFallback(module, it, inspector) }
         } else if (ENABLE_UPSTREAM_REELS_AD_HOOKS) {
             Logger.w(TAG, "Upstream Reels targets unresolved; continuing with independent feed ad hooks")
         } else {
             Logger.i(TAG, "Skipped upstream Reels list/plugin hooks to preserve feed Reels carousels")
         }
-        hooks.instreamBannerEligibilityMethod?.let { hookInstreamBannerEligibility(it) }
-        hooks.indicatorPillAdEligibilityMethod?.let { hookIndicatorPillAdEligibility(it) }
+        hooks.instreamBannerEligibilityMethod?.let { hookInstreamBannerEligibility(module, it) }
+        hooks.indicatorPillAdEligibilityMethod?.let { hookIndicatorPillAdEligibility(module, it) }
         hooks.reelsBannerRenderMethods.forEach { method ->
-            runCatching { hookReelsBannerRender(method) }
+            runCatching { hookReelsBannerRender(module, method) }
                 .onFailure {
                     Logger.e(
                         TAG,
@@ -172,7 +172,7 @@ fun installFacebookAdRemover(classLoader: ClassLoader, bridge: DexKitBridge): Bo
         }
         if (ENABLE_FEED_CSR_FILTER_HOOKS) {
             hooks.feedCsrFilterHooks.forEach { hook ->
-                runCatching { hookFeedCsrFilterInput(hook, feedItemInspector) }
+                runCatching { hookFeedCsrFilterInput(module, hook, feedItemInspector) }
                     .onFailure {
                         Logger.e(
                             TAG,
@@ -186,7 +186,7 @@ fun installFacebookAdRemover(classLoader: ClassLoader, bridge: DexKitBridge): Bo
         }
         if (ENABLE_LATE_FEED_LIST_HOOKS) {
             hooks.lateFeedListHooks.forEach { hook ->
-                runCatching { hookLateFeedListSanitizer(hook, feedItemInspector) }
+                runCatching { hookLateFeedListSanitizer(module, hook, feedItemInspector) }
                     .onFailure {
                         Logger.e(
                             TAG,
@@ -200,7 +200,7 @@ fun installFacebookAdRemover(classLoader: ClassLoader, bridge: DexKitBridge): Bo
         }
         if (ENABLE_STORY_POOL_ADD_HOOKS) {
             hooks.storyPoolAddMethods.forEach { method ->
-                runCatching { hookStoryPoolAdd(method, feedItemInspector) }
+                runCatching { hookStoryPoolAdd(module, method, feedItemInspector) }
                     .onFailure {
                         Logger.e(TAG, "Failed to hook story pool add ${method.declaringClass.name}.${method.name}", it)
                     }
@@ -209,28 +209,28 @@ fun installFacebookAdRemover(classLoader: ClassLoader, bridge: DexKitBridge): Bo
             Logger.i(TAG, "Skipped story pool add hooks to isolate feed Reels carousel loading")
         }
         if (ENABLE_FEED_SPONSORED_POOL_HOOKS) {
-            hooks.sponsoredPoolAddMethod?.let { hookSponsoredPoolAdd(it) }
-            hooks.sponsoredStoryNextMethod?.let { hookSponsoredStoryNext(it) }
+            hooks.sponsoredPoolAddMethod?.let { hookSponsoredPoolAdd(module, it) }
+            hooks.sponsoredStoryNextMethod?.let { hookSponsoredStoryNext(module, it) }
         } else {
             Logger.i(TAG, "Skipped feed sponsored pool hooks to isolate feed Reels carousel loading")
         }
         hooks.storyAdProviders.forEach { provider ->
-            runCatching { hookStoryAdProvider(provider) }
+            runCatching { hookStoryAdProvider(module, provider) }
                 .onFailure {
                     Logger.e(TAG, "Failed to hook story ad source ${provider.providerClass.name}", it)
                 }
         }
         if (ENABLE_FEED_SPONSORED_POOL_HOOKS) {
             hooks.sponsoredPoolClass?.let {
-                hookSponsoredPoolListMethods(it)
-                hookSponsoredPoolResultMethods(it)
+                hookSponsoredPoolListMethods(module, it)
+                hookSponsoredPoolResultMethods(module, it)
             }
             hooks.sponsoredStoryManagerClass?.let {
-                hookSponsoredStoryListMethods(it)
+                hookSponsoredStoryListMethods(module, it)
             }
         }
         hooks.gameAdRequestMethods.forEach { method ->
-            runCatching { hookGameAdRequest(method) }
+            runCatching { hookGameAdRequest(module, method) }
                 .onFailure {
                     Logger.e(
                         TAG,
@@ -240,7 +240,7 @@ fun installFacebookAdRemover(classLoader: ClassLoader, bridge: DexKitBridge): Bo
                 }
         }
         hooks.gameAdBridgePostMessageMethod?.let { method ->
-            runCatching { hookGameAdBridge(method) }
+            runCatching { hookGameAdBridge(module, method) }
                 .onFailure {
                     Logger.e(
                         TAG,
@@ -250,7 +250,7 @@ fun installFacebookAdRemover(classLoader: ClassLoader, bridge: DexKitBridge): Bo
                 }
         }
         hooks.gameAdRequestMethods.firstOrNull()?.declaringClass?.let { bridgeClass ->
-            runCatching { hookGameAdResultMethods(bridgeClass) }
+            runCatching { hookGameAdResultMethods(module, bridgeClass) }
                 .onFailure {
                     Logger.e(
                         TAG,
@@ -258,7 +258,7 @@ fun installFacebookAdRemover(classLoader: ClassLoader, bridge: DexKitBridge): Bo
                         it
                     )
                 }
-            runCatching { hookGameAdServiceDispatchMethods(bridgeClass) }
+            runCatching { hookGameAdServiceDispatchMethods(module, bridgeClass) }
                 .onFailure {
                     Logger.e(
                         TAG,
@@ -268,15 +268,15 @@ fun installFacebookAdRemover(classLoader: ClassLoader, bridge: DexKitBridge): Bo
                 }
         }
         if (ENABLE_AUDIENCE_NETWORK_REWARD_FALLBACKS) {
-            runCatching { hookAudienceNetworkRewardFallbacks(classLoader) }
+            runCatching { hookAudienceNetworkRewardFallbacks(module, classLoader) }
                 .onFailure { Logger.e(TAG, "Failed to hook Audience Network reward fallbacks", it) }
         } else {
             Logger.i(TAG, "Skipped Audience Network reward fallback hooks for compatibility mode")
         }
-        runCatching { hookGameAdSystemDiagnostics(classLoader) }
+        runCatching { hookGameAdSystemDiagnostics(module, classLoader) }
             .onFailure { Logger.e(TAG, "Failed to hook game ad diagnostics", it) }
         hooks.playableAdActivityOnCreate?.let { method ->
-            runCatching { hookPlayableAdActivity(method) }
+            runCatching { hookPlayableAdActivity(module, method) }
                 .onFailure {
                     Logger.e(
                         TAG,
@@ -286,7 +286,7 @@ fun installFacebookAdRemover(classLoader: ClassLoader, bridge: DexKitBridge): Bo
                 }
         }
         hooks.gameAdUiActivityMethods.forEach { method ->
-            runCatching { hookPlayableAdActivity(method) }
+            runCatching { hookPlayableAdActivity(module, method) }
                 .onFailure {
                     Logger.e(
                         TAG,
@@ -295,11 +295,11 @@ fun installFacebookAdRemover(classLoader: ClassLoader, bridge: DexKitBridge): Bo
                     )
                 }
         }
-        runCatching { hookGlobalGameAdActivityLifecycleFallback() }
+        runCatching { hookGlobalGameAdActivityLifecycleFallback(module) }
             .onFailure { Logger.e(TAG, "Failed to hook global game ad activity lifecycle fallback", it) }
-        runCatching { hookGameAdActivityLaunchFallbacks() }
+        runCatching { hookGameAdActivityLaunchFallbacks(module) }
             .onFailure { Logger.e(TAG, "Failed to hook game ad launch fallbacks", it) }
-        runCatching { hookGlobalGameAdSurfaceFallbacks() }
+        runCatching { hookGlobalGameAdSurfaceFallbacks(module) }
             .onFailure { Logger.e(TAG, "Failed to hook global game ad surface fallbacks", it) }
         Logger.i(
             TAG,
@@ -659,7 +659,7 @@ internal fun resolveStoryAdProviderHooks(
     )
 }
 
-internal fun installFacebook571FeedResponseFastPath(classLoader: ClassLoader): Boolean {
+internal fun installFacebook571FeedResponseFastPath(module: XposedModule, classLoader: ClassLoader): Boolean {
     val contractTypes = FB571_FEED_ITEM_CONTRACT_CLASSES.mapNotNull { className ->
         runCatching { Class.forName(className, false, classLoader) }.getOrNull()
     }
@@ -691,19 +691,19 @@ internal fun installFacebook571FeedResponseFastPath(classLoader: ClassLoader): B
 
     var installed = 0
     hooks.forEach { hook ->
-        if (hookFeedCsrFilterInput(hook, feedItemInspector)) {
+        if (hookFeedCsrFilterInput(module, hook, feedItemInspector)) {
             installed++
         }
     }
     val networkHooks = resolveFacebook571NetworkFeedHooks(classLoader)
     var networkInstalled = 0
     networkHooks.forEach { hook ->
-        if (hookLateFeedListSanitizer(hook, feedItemInspector)) {
+        if (hookLateFeedListSanitizer(module, hook, feedItemInspector)) {
             networkInstalled++
         }
     }
     val sponsoredPoolMethod = resolveFacebook571SponsoredPoolAdd(classLoader)
-    val poolInstalled = sponsoredPoolMethod?.let(::hookSponsoredPoolAdd) == true
+    val poolInstalled = sponsoredPoolMethod?.let { hookSponsoredPoolAdd(module, it) } == true
     if (installed > 0) {
         Logger.i(
             TAG,
@@ -757,7 +757,7 @@ internal fun resolveFacebook571SponsoredPoolAdd(classLoader: ClassLoader): Metho
         ?.apply { isAccessible = true }
 }
 
-internal fun hookGlobalGameAdSurfaceFallbacks() {
+internal fun hookGlobalGameAdSurfaceFallbacks(module: XposedModule) {
     if (!gameAdSurfaceHooksInstalled.compareAndSet(0, 1)) return
 
     var hooked = 0
@@ -771,29 +771,29 @@ internal fun hookGlobalGameAdSurfaceFallbacks() {
         }
         .forEach { method ->
             method.isAccessible = true
-            XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    val parent = param.thisObject as? ViewGroup
-                    val child = param.args.firstOrNull { it is View } as? View ?: return
-                    if (isPotentialNativeGameAdView(child)) {
-                        hideLikelyAdContainer(child, "native ad view add ${child.javaClass.name}")
-                        scheduleGameAdSurfaceSweep(child, "native ad view add ${child.javaClass.name}")
-                    } else if (isPotentialExplicitFeedAdMarkerView(child)) {
-                        hideLikelyAdContainer(child, "explicit feed ad view add ${child.javaClass.name}")
-                        scheduleGameAdSurfaceSweep(child, "explicit feed ad view add ${child.javaClass.name}")
-                    } else if (ENABLE_FEED_UI_MARKER_FALLBACKS && isPotentialFeedAdMarkerView(child)) {
-                        hideLikelyAdContainer(child, "feed ad marker view add ${child.javaClass.name}")
-                        scheduleGameAdSurfaceSweep(child, "feed ad marker view add ${child.javaClass.name}")
-                    } else if (ENABLE_FEED_UI_MARKER_FALLBACKS && isPotentialFeedReelCtaAdMarkerView(child)) {
-                        hideLikelyFeedReelCtaAdContainer(child, "feed reel CTA view add ${child.javaClass.name}")
-                        scheduleGameAdSurfaceSweep(child, "feed reel CTA view add ${child.javaClass.name}")
-                    } else if (shouldScheduleFeedRowSweep(parent, child)) {
-                        scheduleFeedRowSweep(child, "feed row add ${child.javaClass.name}")
-                    } else if (child is WebView) {
-                        injectGameAdHidingScript(child)
-                    }
+            module.hook(method).intercept { chain ->
+                val res = chain.proceed()
+                val parent = chain.thisObject as? ViewGroup
+                val child = chain.args.firstOrNull { it is View } as? View ?: return@intercept res
+                if (isPotentialNativeGameAdView(child)) {
+                    hideLikelyAdContainer(child, "native ad view add ${child.javaClass.name}")
+                    scheduleGameAdSurfaceSweep(child, "native ad view add ${child.javaClass.name}")
+                } else if (isPotentialExplicitFeedAdMarkerView(child)) {
+                    hideLikelyAdContainer(child, "explicit feed ad view add ${child.javaClass.name}")
+                    scheduleGameAdSurfaceSweep(child, "explicit feed ad view add ${child.javaClass.name}")
+                } else if (ENABLE_FEED_UI_MARKER_FALLBACKS && isPotentialFeedAdMarkerView(child)) {
+                    hideLikelyAdContainer(child, "feed ad marker view add ${child.javaClass.name}")
+                    scheduleGameAdSurfaceSweep(child, "feed ad marker view add ${child.javaClass.name}")
+                } else if (ENABLE_FEED_UI_MARKER_FALLBACKS && isPotentialFeedReelCtaAdMarkerView(child)) {
+                    hideLikelyFeedReelCtaAdContainer(child, "feed reel CTA view add ${child.javaClass.name}")
+                    scheduleGameAdSurfaceSweep(child, "feed reel CTA view add ${child.javaClass.name}")
+                } else if (shouldScheduleFeedRowSweep(parent, child)) {
+                    scheduleFeedRowSweep(child, "feed row add ${child.javaClass.name}")
+                } else if (child is WebView) {
+                    injectGameAdHidingScript(child)
                 }
-            })
+                res
+            }
             hooked++
         }
 
@@ -808,21 +808,21 @@ internal fun hookGlobalGameAdSurfaceFallbacks() {
         }
         .forEach { method ->
             method.isAccessible = true
-            XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    val textView = param.thisObject as? TextView ?: return
-                    if (isExplicitFeedAdMarkerText(textView.text)) {
-                        hideLikelyAdContainer(textView, "explicit feed ad text")
-                        return
-                    }
-                    if (!ENABLE_FEED_UI_MARKER_FALLBACKS) return
-                    if (isAnyAdMarkerText(textView.text)) {
-                        hideLikelyAdContainer(textView, "ad marker text")
-                    } else if (isFeedReelCtaAdMarkerText(textView.text)) {
-                        hideLikelyFeedReelCtaAdContainer(textView, "feed reel CTA text")
-                    }
+            module.hook(method).intercept { chain ->
+                val res = chain.proceed()
+                val textView = chain.thisObject as? TextView ?: return@intercept res
+                if (isExplicitFeedAdMarkerText(textView.text)) {
+                    hideLikelyAdContainer(textView, "explicit feed ad text")
+                    return@intercept res
                 }
-            })
+                if (!ENABLE_FEED_UI_MARKER_FALLBACKS) return@intercept res
+                if (isAnyAdMarkerText(textView.text)) {
+                    hideLikelyAdContainer(textView, "ad marker text")
+                } else if (isFeedReelCtaAdMarkerText(textView.text)) {
+                    hideLikelyFeedReelCtaAdContainer(textView, "feed reel CTA text")
+                }
+                res
+            }
             hooked++
         }
 
@@ -837,21 +837,21 @@ internal fun hookGlobalGameAdSurfaceFallbacks() {
         }
         .forEach { method ->
             method.isAccessible = true
-            XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    val view = param.thisObject as? View ?: return
-                    if (isExplicitFeedAdMarkerText(view.contentDescription)) {
-                        hideLikelyAdContainer(view, "explicit feed ad content description")
-                        return
-                    }
-                    if (!ENABLE_FEED_UI_MARKER_FALLBACKS) return
-                    if (isFeedAdMarkerText(view.contentDescription)) {
-                        hideLikelyAdContainer(view, "feed ad content description")
-                    } else if (isFeedReelCtaAdMarkerText(view.contentDescription)) {
-                        hideLikelyFeedReelCtaAdContainer(view, "feed reel CTA content description")
-                    }
+            module.hook(method).intercept { chain ->
+                val res = chain.proceed()
+                val view = chain.thisObject as? View ?: return@intercept res
+                if (isExplicitFeedAdMarkerText(view.contentDescription)) {
+                    hideLikelyAdContainer(view, "explicit feed ad content description")
+                    return@intercept res
                 }
-            })
+                if (!ENABLE_FEED_UI_MARKER_FALLBACKS) return@intercept res
+                if (isFeedAdMarkerText(view.contentDescription)) {
+                    hideLikelyAdContainer(view, "feed ad content description")
+                } else if (isFeedReelCtaAdMarkerText(view.contentDescription)) {
+                    hideLikelyFeedReelCtaAdContainer(view, "feed reel CTA content description")
+                }
+                res
+            }
             hooked++
         }
 
@@ -865,13 +865,13 @@ internal fun hookGlobalGameAdSurfaceFallbacks() {
         }
         .forEach { method ->
             method.isAccessible = true
-            XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    val webView = param.thisObject as? WebView ?: return
-                    injectGameAdHidingScript(webView)
-                    scheduleGameAdSurfaceSweep(webView, "webview ${method.name}")
-                }
-            })
+            module.hook(method).intercept { chain ->
+                val res = chain.proceed()
+                val webView = chain.thisObject as? WebView ?: return@intercept res
+                injectGameAdHidingScript(webView)
+                scheduleGameAdSurfaceSweep(webView, "webview ${method.name}")
+                res
+            }
             hooked++
         }
 
@@ -1249,41 +1249,36 @@ internal fun resolveSponsoredPoolAddMethod(classLoader: ClassLoader, sponsoredPo
     return listOf(method).firstMethodInstanceOrNull(classLoader)
 }
 
-internal fun hookListBuilderAppend(method: Method, inspector: AdStoryInspector) {
-    XposedBridge.hookMethod(method, object : XC_MethodHook() {
-        override fun beforeHookedMethod(param: MethodHookParam) {
-            val list = param.args.lastOrNull() as? MutableList<Any?> ?: return
-            val removed = filterAdItems(list, inspector)
-            if (removed > 0) {
-                Logger.i(TAG, "Removed $removed ad item(s) from reels list (append)")
-            }
+internal fun hookListBuilderAppend(module: XposedModule, method: Method, inspector: AdStoryInspector) {
+    module.hook(method).intercept { chain ->
+        val list = chain.args.lastOrNull() as? MutableList<Any?> ?: return@intercept chain.proceed()
+        val removed = filterAdItems(list, inspector)
+        if (removed > 0) {
+            Logger.i(TAG, "Removed $removed ad item(s) from reels list (append)")
         }
-    })
+        chain.proceed()
+    }
 }
 
-internal fun hookPluginPackFallback(method: Method, inspector: AdStoryInspector) {
-    XposedBridge.hookMethod(method, object : XC_MethodHook() {
-        override fun beforeHookedMethod(param: MethodHookParam) {
-            if (isMarketplaceAdsPluginPack(param.thisObject)) {
-                Logger.i(TAG, "Returning an empty plugin pack for marketplace ads (${method.declaringClass.name})")
-                param.result = arrayListOf<Any?>()
-                return
-            }
-            if (inspector.containsAdStory(param.thisObject)) {
-                Logger.i(TAG, "Returning an empty plugin pack for an ad-backed story")
-                param.result = arrayListOf<Any?>()
-            }
+internal fun hookPluginPackFallback(module: XposedModule, method: Method, inspector: AdStoryInspector) {
+    module.hook(method).intercept { chain ->
+        if (isMarketplaceAdsPluginPack(chain.thisObject!!)) {
+            Logger.i(TAG, "Returning an empty plugin pack for marketplace ads (${method.declaringClass.name})")
+            return@intercept arrayListOf<Any?>()
         }
-
-        override fun afterHookedMethod(param: MethodHookParam) {
-            if (isMarketplaceAdsPluginPack(param.thisObject)) return
-            val result = param.result as? MutableList<Any?> ?: return
-            val removed = filterAdItems(result, inspector)
-            if (removed > 0) {
-                Logger.i(TAG, "Removed $removed ad plugin item(s)")
-            }
+        if (inspector.containsAdStory(chain.thisObject)) {
+            Logger.i(TAG, "Returning an empty plugin pack for an ad-backed story")
+            return@intercept arrayListOf<Any?>()
         }
-    })
+        
+        val result = chain.proceed()
+        val list = result as? MutableList<Any?> ?: return@intercept result
+        val removed = filterAdItems(list, inspector)
+        if (removed > 0) {
+            Logger.i(TAG, "Removed $removed ad plugin item(s)")
+        }
+        result
+    }
 }
 
 internal val marketplaceAdsPackCache = ConcurrentHashMap<String, Boolean>()
@@ -1322,8 +1317,8 @@ internal fun resolveSponsoredStoryNextMethod(
     return listOf(method).firstMethodInstanceOrNull(classLoader)
 }
 
-fun installFacebook571FeedSourceFastPath(classLoader: ClassLoader): Boolean {
-    val responseHooksInstalled = installFacebook571FeedResponseFastPath(classLoader)
+fun installFacebook571FeedSourceFastPath(module: XposedModule, classLoader: ClassLoader): Boolean {
+    val responseHooksInstalled = installFacebook571FeedResponseFastPath(module, classLoader)
     val providers = FB571_STORY_AD_SOURCE_CLASSES.mapNotNull { className ->
         val providerClass = runCatching {
             Class.forName(className, false, classLoader)
@@ -1337,7 +1332,7 @@ fun installFacebook571FeedSourceFastPath(classLoader: ClassLoader): Boolean {
     }
 
     providers.forEach { provider ->
-        hookStoryAdProvider(provider)
+        hookStoryAdProvider(module, provider)
     }
     if (providers.isNotEmpty()) {
         Logger.i(TAG, "Installed FB 571 fast feed source hooks=${providers.joinToString { it.providerClass.name }}")
@@ -1345,7 +1340,7 @@ fun installFacebook571FeedSourceFastPath(classLoader: ClassLoader): Boolean {
     return responseHooksInstalled
 }
 
-fun installFacebook571FeedComponentGuard(classLoader: ClassLoader): Boolean {
+fun installFacebook571FeedComponentGuard(module: XposedModule, classLoader: ClassLoader): Boolean {
     val componentClass = runCatching {
         Class.forName("X.2OT", false, classLoader)
     }.getOrNull() ?: return false
@@ -1376,27 +1371,25 @@ fun installFacebook571FeedComponentGuard(classLoader: ClassLoader): Boolean {
         val key = methodHookKey(method)
         if (!feedComponentMethodsHooked.add(key)) return@forEach
 
-        XposedBridge.hookMethod(method, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                val owner = param.thisObject ?: return
-                val component = when {
-                    componentClass.isInstance(owner) -> owner
-                    wrapperClass.isInstance(owner) -> runCatching {
-                        wrapperChildField.get(owner)
-                    }.getOrNull()?.takeIf(componentClass::isInstance)
-                    else -> null
-                } ?: return
-                val edge = runCatching { edgeField.get(component) }.getOrNull() ?: return
-                if (!inspector.isDefinitelySponsoredFeedItem(edge)) return
+        module.hook(method).intercept { chain ->
+            val owner = chain.thisObject ?: return@intercept chain.proceed()
+            val component = when {
+                componentClass.isInstance(owner) -> owner
+                wrapperClass.isInstance(owner) -> runCatching {
+                    wrapperChildField.get(owner)
+                }.getOrNull()?.takeIf(componentClass::isInstance)
+                else -> null
+            } ?: return@intercept chain.proceed()
+            val edge = runCatching { edgeField.get(component) }.getOrNull() ?: return@intercept chain.proceed()
+            if (!inspector.isDefinitelySponsoredFeedItem(edge)) return@intercept chain.proceed()
 
-                param.result = null
-                logHookHitThrottled(
-                    "sponsoredFeedComponentBlock",
-                    method,
-                    inspector.describe(edge)
-                )
-            }
-        })
+            logHookHitThrottled(
+                "sponsoredFeedComponentBlock",
+                method,
+                inspector.describe(edge)
+            )
+            null
+        }
         installed++
     }
     if (installed > 0) {
@@ -1409,42 +1402,42 @@ fun installFacebook571FeedComponentGuard(classLoader: ClassLoader): Boolean {
     return true
 }
 
-internal fun hookPlayableAdActivity(method: Method) {
-    XposedBridge.hookMethod(method, object : XC_MethodHook() {
-        override fun afterHookedMethod(param: MethodHookParam) {
-            val activity = param.thisObject as? Activity ?: return
-            if (activity.javaClass.name != method.declaringClass.name) return
-            handleGameAdActivity(activity, "direct hook ${method.declaringClass.name}.${method.name}")
-        }
-    })
+internal fun hookPlayableAdActivity(module: XposedModule, method: Method) {
+    module.hook(method).intercept { chain ->
+        val res = chain.proceed()
+        val activity = chain.thisObject as? Activity ?: return@intercept res
+        if (activity.javaClass.name != method.declaringClass.name) return@intercept res
+        handleGameAdActivity(activity, "direct hook ${method.declaringClass.name}.${method.name}")
+        res
+    }
 }
 
-internal fun hookGlobalGameAdActivityLifecycleFallback() {
+internal fun hookGlobalGameAdActivityLifecycleFallback(module: XposedModule) {
     val onResume = (Activity::class.java.declaredMethods + Activity::class.java.methods).firstOrNull { method ->
         method.name == "onResume" && method.parameterCount == 0
     }?.apply { isAccessible = true } ?: return
 
-    XposedBridge.hookMethod(onResume, object : XC_MethodHook() {
-        override fun afterHookedMethod(param: MethodHookParam) {
-            val activity = param.thisObject as? Activity ?: return
-            val isGameAdActivity = activity.javaClass.name in GAME_AD_ACTIVITY_CLASS_NAMES
-            if (!(ENABLE_GAME_AD_DIAGNOSTICS && isGameAdActivity)) {
-                scheduleGameAdSurfaceSweep(activity.window?.decorView, "activity resume ${activity.javaClass.name}")
-            }
-            if (activity.javaClass.name !in GAME_AD_ACTIVITY_CLASS_NAMES) return
-            markGameAdDiagnosticFlow("activity.onResume ${activity.javaClass.name}")
-            logGameAdDiagnostic(
-                "activity.onResume",
-                "${activity.javaClass.name} intent=${formatDiagValue(activity.intent)}"
-            )
-            handleGameAdActivity(activity, "global lifecycle fallback")
+    module.hook(onResume).intercept { chain ->
+        val res = chain.proceed()
+        val activity = chain.thisObject as? Activity ?: return@intercept res
+        val isGameAdActivity = activity.javaClass.name in GAME_AD_ACTIVITY_CLASS_NAMES
+        if (!(ENABLE_GAME_AD_DIAGNOSTICS && isGameAdActivity)) {
+            scheduleGameAdSurfaceSweep(activity.window?.decorView, "activity resume ${activity.javaClass.name}")
         }
-    })
+        if (activity.javaClass.name !in GAME_AD_ACTIVITY_CLASS_NAMES) return@intercept res
+        markGameAdDiagnosticFlow("activity.onResume ${activity.javaClass.name}")
+        logGameAdDiagnostic(
+            "activity.onResume",
+            "${activity.javaClass.name} intent=${formatDiagValue(activity.intent)}"
+        )
+        handleGameAdActivity(activity, "global lifecycle fallback")
+        res
+    }
 
     Logger.i(TAG, "Hooked global game ad activity lifecycle fallback")
 }
 
-internal fun hookGameAdActivityLaunchFallbacks() {
+internal fun hookGameAdActivityLaunchFallbacks(module: XposedModule) {
     val methods = LinkedHashMap<String, Method>()
     listOf(android.app.Instrumentation::class.java, Activity::class.java, ContextWrapper::class.java).forEach { type ->
         (type.declaredMethods + type.methods)
@@ -1469,7 +1462,7 @@ internal fun hookGameAdActivityLaunchFallbacks() {
     var hooked = 0
     methods.values.forEach { method ->
         runCatching {
-            hookGameAdActivityLaunchMethod(method)
+            hookGameAdActivityLaunchMethod(module, method)
             hooked++
         }.onFailure {
             Logger.w(TAG, "Failed to hook game ad launch fallback ${method.declaringClass.name}.${method.name}", it)
@@ -1478,39 +1471,119 @@ internal fun hookGameAdActivityLaunchFallbacks() {
     Logger.i(TAG, "Hooked $hooked game ad activity launch fallback method(s)")
 }
 
-internal fun hookGameAdActivityLaunchMethod(method: Method) {
-    XposedBridge.hookMethod(method, object : XC_MethodHook() {
-        override fun beforeHookedMethod(param: MethodHookParam) {
-            val intent = param.args.firstOrNull { it is Intent } as? Intent ?: return
-            val blockedClassName = resolveBlockedGameAdActivity(intent) ?: return
-            markGameAdDiagnosticFlow("activity.launch $blockedClassName")
-            logGameAdDiagnostic(
-                "activity.launch.before",
-                "${methodSignature(method)} target=$blockedClassName args=${formatDiagArgs(param.args)}"
-            )
-            if (!ENABLE_GAME_AD_AUTOFIX) return
-            if (!shouldBlockGameAdActivityLaunch(blockedClassName)) return
-            completeRecentGameAdRequests("launch fallback $blockedClassName")
-            if (method.returnType == Boolean::class.javaPrimitiveType) {
-                param.result = false
-            } else {
-                param.result = null
-            }
-            Logger.i(
-                TAG,
-                "Blocked game ad activity launch to $blockedClassName via ${method.declaringClass.name}.${method.name}"
-            )
+internal fun hookGameAdActivityLaunchMethod(module: XposedModule, method: Method) {
+    module.hook(method).intercept { chain ->
+        val intent = chain.args.firstOrNull { it is Intent } as? Intent ?: return@intercept chain.proceed()
+        val blockedClassName = resolveBlockedGameAdActivity(intent) ?: return@intercept chain.proceed()
+        markGameAdDiagnosticFlow("activity.launch $blockedClassName")
+        logGameAdDiagnostic(
+            "activity.launch.before",
+            "${methodSignature(method)} target=$blockedClassName args=${formatDiagArgs(chain.args.toTypedArray())}"
+        )
+        if (!ENABLE_GAME_AD_AUTOFIX) return@intercept chain.proceed()
+        if (!shouldBlockGameAdActivityLaunch(blockedClassName)) return@intercept chain.proceed()
+        completeRecentGameAdRequests("launch fallback $blockedClassName")
+        
+        Logger.i(
+            TAG,
+            "Blocked game ad activity launch to $blockedClassName via ${method.declaringClass.name}.${method.name}"
+        )
+        
+        if (method.returnType == Boolean::class.javaPrimitiveType) {
+            false
+        } else {
+            null
         }
+    }
+}
 
-        override fun afterHookedMethod(param: MethodHookParam) {
-            val intent = param.args.firstOrNull { it is Intent } as? Intent ?: return
-            val blockedClassName = resolveBlockedGameAdActivity(intent) ?: return
-            logGameAdDiagnostic(
-                "activity.launch.after",
-                "${methodSignature(method)} target=$blockedClassName result=${formatDiagValue(param.result)} throwable=${formatDiagThrowable(param.throwable)}"
-            )
+internal fun hookInstreamBannerEligibility(module: XposedModule, method: Method) {
+    module.hook(method).intercept { false }
+}
+
+internal fun hookIndicatorPillAdEligibility(module: XposedModule, method: Method) {
+    module.hook(method).intercept { false }
+}
+
+internal fun hookReelsBannerRender(module: XposedModule, method: Method) {
+    module.hook(method).intercept { null }
+}
+
+internal fun resolveInstreamBannerEligibilityMethod(classLoader: ClassLoader, bridge: DexKitBridge): Method? {
+    return bridge.findMethod {
+        matcher {
+            usingStrings("instream_legacy_banner_ad", "unified_player_banner_ad")
+            returnType = "boolean"
+            paramCount = 0
         }
-    })
+    }.firstMethodInstanceOrNull(classLoader)
+}
+
+internal fun resolveIndicatorPillAdEligibilityMethod(classLoader: ClassLoader, bridge: DexKitBridge): Method? {
+    return bridge.findMethod {
+        matcher {
+            usingStrings("floatingcta")
+            returnType = "boolean"
+            paramCount = 0
+        }
+    }.firstMethodInstanceOrNull(classLoader)
+}
+
+internal fun resolveReelsBannerRenderMethods(classLoader: ClassLoader, bridge: DexKitBridge): List<Method> {
+    return bridge.findMethod {
+        matcher {
+            usingStrings("reels_banner_ad")
+        }
+    }.filter { it.name != "<init>" && it.name != "<clinit>" }
+        .mapNotNull { runCatching { it.getMethodInstance(classLoader) }.getOrNull() }
+}
+
+private val hookHitCounters = ConcurrentHashMap<String, AtomicInteger>()
+
+internal fun logHookHitThrottled(key: String, method: Method, detail: String? = null) {
+    val counter = hookHitCounters.getOrPut(key) { AtomicInteger(0) }
+    val count = counter.incrementAndGet()
+    if (count == 1 || count % HOOK_HIT_LOG_EVERY == 0) {
+        val detailPart = if (detail != null) " ($detail)" else ""
+        Logger.i(TAG, "Hook hit $key count=$count at ${method.declaringClass.name}.${method.name}$detailPart")
+    }
+}
+
+internal fun logMissingHooks(
+    pluginPackClasses: List<ClassData>,
+    factoryMethod: Method?,
+    pluginMethods: List<Method>,
+    instreamBannerEligibilityMethod: Method?,
+    indicatorPillAdEligibilityMethod: Method?,
+    reelsBannerRenderMethods: List<Method>,
+    feedCsrFilterHooks: List<FeedCsrFilterHook>,
+    lateFeedListHooks: List<FeedListSanitizerHook>,
+    storyPoolAddMethods: List<Method>,
+    sponsoredPoolClass: ClassData?,
+    poolAddMethod: Method?,
+    sponsoredStoryManagerClass: ClassData?,
+    sponsoredStoryNextMethod: Method?,
+    storyAdProviderClasses: List<ClassData>,
+    storyAdProviders: List<StoryAdProviderHooks>,
+    gameAdRequestMethods: List<Method>,
+    gameAdBridgePostMessageMethod: Method?,
+    playableAdActivityOnCreate: Method?,
+    gameAdUiActivityMethods: List<Method>
+) {
+    if (pluginPackClasses.isEmpty()) Logger.missing(TAG, "pluginPackClasses")
+    if (factoryMethod == null) Logger.missing(TAG, "factoryMethod")
+    if (pluginMethods.isEmpty()) Logger.missing(TAG, "pluginMethods")
+    if (instreamBannerEligibilityMethod == null) Logger.missing(TAG, "instreamBannerEligibilityMethod")
+    if (indicatorPillAdEligibilityMethod == null) Logger.missing(TAG, "indicatorPillAdEligibilityMethod")
+    if (reelsBannerRenderMethods.isEmpty()) Logger.missing(TAG, "reelsBannerRenderMethods")
+    if (feedCsrFilterHooks.isEmpty()) Logger.missing(TAG, "feedCsrFilterHooks")
+    if (lateFeedListHooks.isEmpty()) Logger.missing(TAG, "lateFeedListHooks")
+    if (storyPoolAddMethods.isEmpty()) Logger.missing(TAG, "storyPoolAddMethods")
+    if (sponsoredPoolClass == null) Logger.missing(TAG, "sponsoredPoolClass")
+    if (poolAddMethod == null) Logger.missing(TAG, "poolAddMethod")
+    if (sponsoredStoryManagerClass == null) Logger.missing(TAG, "sponsoredStoryManagerClass")
+    if (sponsoredStoryNextMethod == null) Logger.missing(TAG, "sponsoredStoryNextMethod")
+    if (storyAdProviders.isEmpty()) Logger.missing(TAG, "storyAdProviders")
 }
 
 internal fun shouldBlockGameAdActivityLaunch(className: String): Boolean {
