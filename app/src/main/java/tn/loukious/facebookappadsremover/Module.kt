@@ -256,7 +256,8 @@ class Module : XposedModule() {
             }
 
             try {
-                DexKitBridge.create(classLoader, true).use { bridge ->
+                ensureDexKitLoaded()
+                DexKitBridge.create(classLoader, false).use { bridge ->
                     debugLogInfo("Scanning Facebook secondary dex, attempt=$attemptNumber")
                     if (installFacebookAdRemover(module, classLoader, bridge)) {
                         sHooksInstalled.set(true)
@@ -273,13 +274,15 @@ class Module : XposedModule() {
         }
 
         private fun ensureDexKitLoaded() {
-            if (sDexKitLoaded) {
-                return
-            }
+            if (sDexKitLoaded) return
             synchronized(Module::class.java) {
                 if (!sDexKitLoaded) {
-                    System.loadLibrary("dexkit")
-                    sDexKitLoaded = true
+                    try {
+                        System.loadLibrary("dexkit")
+                        sDexKitLoaded = true
+                    } catch (t: Throwable) {
+                        Logger.e(TAG, "Failed to load dexkit JNI library", t)
+                    }
                 }
             }
         }
