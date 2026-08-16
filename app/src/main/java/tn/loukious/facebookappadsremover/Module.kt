@@ -2,22 +2,24 @@ package tn.loukious.facebookappadsremover
 
 import android.app.Application
 import android.content.Context
-import io.github.libxposed.api.XposedInterface
-import io.github.libxposed.api.XposedModule
-import io.github.libxposed.api.XposedModuleInterface
+import android.os.Looper
+import android.util.Log
+import de.robv.android.xposed.IXposedHookLoadPackage
+import de.robv.android.xposed.XC_MethodHook
+import de.robv.android.xposed.XposedBridge
+import de.robv.android.xposed.callbacks.XC_LoadPackage
 import org.luckypray.dexkit.DexKitBridge
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
-class Module : XposedModule() {
+class Module : IXposedHookLoadPackage {
 
-    override fun onPackageLoaded(param: XposedModuleInterface.PackageLoadedParam) {
-        super.onPackageLoaded(param)
+    override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
         // LSPosed API 101 with Static Scope automatically filters package loading.
-        if (param.packageName != "com.facebook.katana") return
+        if (lpparam.packageName != "com.facebook.katana") return
 
-        initModule(this, param)
+        initModule(lpparam)
     }
 
     companion object {
@@ -38,15 +40,16 @@ class Module : XposedModule() {
         private val sHooksInstalled = AtomicBoolean(false)
 
         @Volatile
-        private var sClassLoadNotifierUnhook: XposedInterface.HookHandle? = null
+        private var sClassLoadNotifierUnhook: XC_MethodHook.Unhook? = null
 
         private val sTaskExecutor = Executors.newSingleThreadScheduledExecutor { runnable ->
             Thread(runnable, "FacebookAdsHookExecutor")
         }
 
-        private fun initModule(module: Module, param: XposedModuleInterface.PackageLoadedParam) {
-            debugLogInfo("Loading hooks for package=${param.packageName} process=${param.applicationInfo.processName}")
-            installFacebookDexReadyHook(module, param.defaultClassLoader)
+        @JvmStatic
+        private fun initModule(lpparam: XC_LoadPackage.LoadPackageParam) {
+            debugLogInfo("Loading hooks for package=${lpparam.packageName} process=${lpparam.processName}")
+            installFacebookDexReadyHook(lpparam.classLoader)
             ensureDexKitLoaded()
             if (!sAttachHookInstalled.compareAndSet(false, true)) {
                 return
@@ -54,12 +57,12 @@ class Module : XposedModule() {
 
             val attach = Application::class.java.getDeclaredMethod("attach", Context::class.java)
             attach.isAccessible = true
-            module.hook(attach).intercept { chain ->
-                val res = chain.proceed()
-                val application = chain.thisObject as Application
-                scheduleHookInstallAttempts(module, application.classLoader)
-                res
-            }
+            XposedBridge.hookMethod(attach, object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    val application = param.thisObject as Application
+                    scheduleHookInstallAttempts(application.classLoader)
+                }
+            })
             debugLogInfo("Waiting for Facebook Application.attach before scanning secondary dex")
         }
 
@@ -71,12 +74,12 @@ class Module : XposedModule() {
             Logger.e(TAG, message, throwable)
         }
 
-        private fun installFacebookDexReadyHook(module: Module, classLoader: ClassLoader) {
+        private fun installFacebookDexReadyHook(classLoader: ClassLoader) {
             if (!sDexReadyHookInstalled.compareAndSet(false, true)) {
                 return
             }
             try {
-                installFacebookClassLoadNotifierHook(module, classLoader)
+                installFacebookClassLoadNotifierHook(classLoader)
                 val multiDexClassLoader = Class.forName(
                     "com.facebook.common.dextricks.MultiDexClassLoaderJava",
                     false,
@@ -91,16 +94,16 @@ class Module : XposedModule() {
                     return
                 }
                 configure.isAccessible = true
-                module.hook(configure).intercept { chain ->
-                    val res = chain.proceed()
-                    val configuredLoader = if (chain.thisObject is ClassLoader) {
-                        chain.thisObject as ClassLoader
-                    } else {
-                        classLoader
+                XposedBridge.hookMethod(configure, object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        val configuredLoader = if (param.thisObject is ClassLoader) {
+                            param.thisObject as ClassLoader
+                        } else {
+                            classLoader
+                        }
+                        tryInstallFastFeedHooksAtDexReady(configuredLoader, "MultiDex configure")
                     }
-                    tryInstallFastFeedHooksAtDexReady(module, configuredLoader, "MultiDex configure")
-                    res
-                }
+                })
 
                 var fallbackHooks = 0
                 val multiDexBase = Class.forName(
@@ -114,13 +117,13 @@ class Module : XposedModule() {
                         method.parameterTypes[0] == String::class.java
                     ) {
                         method.isAccessible = true
-                        module.hook(method).intercept { chain ->
-                            val res = chain.proceed()
-                            if (res == true) {
-                                tryInstallFastFeedHooksAtDexReady(module, classLoader, "long-tail dex load")
+                        XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                            override fun afterHookedMethod(param: MethodHookParam) {
+                                if (param.result == true) {
+                                    tryInstallFastFeedHooksAtDexReady(classLoader, "long-tail dex load")
+                                }
                             }
-                            res
-                        }
+                        })
                         fallbackHooks++
                     }
                 }
@@ -134,7 +137,7 @@ class Module : XposedModule() {
         }
 
         @Throws(Exception::class)
-        private fun installFacebookClassLoadNotifierHook(module: Module, classLoader: ClassLoader) {
+        private fun installFacebookClassLoadNotifierHook(classLoader: ClassLoader) {
             val notifierClass = Class.forName(
                 "com.facebook.common.dextricks.ClassLoadsNotifier",
                 false,
@@ -142,19 +145,21 @@ class Module : XposedModule() {
             )
             val notifyClassLoaded = notifierClass.getDeclaredMethod("notifyClassLoaded", Class::class.java)
             notifyClassLoaded.isAccessible = true
-            sClassLoadNotifierUnhook = module.hook(notifyClassLoaded).intercept { chain ->
-                val res = chain.proceed()
-                val loadedClass = chain.args[0] as? Class<*>
-                if (loadedClass != null && isFastFeedTargetClass(loadedClass.name)) {
+            sClassLoadNotifierUnhook = XposedBridge.hookMethod(notifyClassLoaded, object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    val loadedClass = param.args[0] as? Class<*>
+                    if (loadedClass == null || !isFastFeedTargetClass(loadedClass.name)) {
+                        return
+                    }
+
                     val targetLoader = loadedClass.classLoader ?: classLoader
                     debugLogInfo(
                         "Observed FB 571 feed source class load=${loadedClass.name} " +
                                 "loader=${targetLoader.javaClass.name}"
                     )
-                    tryInstallFastFeedHooksAtDexReady(module, targetLoader, "class-load notification")
+                    tryInstallFastFeedHooksAtDexReady(targetLoader, "class-load notification")
                 }
-                res
-            }
+            })
             debugLogInfo("Waiting for FB 571 feed source class load before installing decoded response hooks")
         }
 
@@ -164,10 +169,10 @@ class Module : XposedModule() {
             )
         }
 
-        private fun tryInstallFastFeedHooksAtDexReady(module: Module, classLoader: ClassLoader, readinessSource: String) {
+        private fun tryInstallFastFeedHooksAtDexReady(classLoader: ClassLoader, readinessSource: String) {
             if (!sFastSourceHooksInstalled.get() && sFastInstallInProgress.compareAndSet(false, true)) {
                 try {
-                    if (installFacebook571FeedSourceFastPath(module, classLoader)) {
+                    if (installFacebook571FeedSourceFastPath(classLoader)) {
                         sFastSourceHooksInstalled.set(true)
                         debugLogInfo("FB 571 decoded response hooks installed synchronously at $readinessSource")
                     }
@@ -177,7 +182,7 @@ class Module : XposedModule() {
                     sFastInstallInProgress.set(false)
                 }
             }
-            tryInstallFeedComponentGuard(module, classLoader, readinessSource)
+            tryInstallFeedComponentGuard(classLoader, readinessSource)
             removeClassLoadNotifierHook()
         }
 
@@ -185,42 +190,42 @@ class Module : XposedModule() {
             if (!sFastSourceHooksInstalled.get() || !sFeedComponentGuardInstalled.get()) {
                 return
             }
-            val handle = sClassLoadNotifierUnhook ?: return
+            val unhook = sClassLoadNotifierUnhook ?: return
             sClassLoadNotifierUnhook = null
-            handle.unhook()
+            unhook.unhook()
             debugLogInfo("Removed FB 571 class-load notifier after decoded hooks became active")
         }
 
-        private fun scheduleHookInstallAttempts(module: Module, classLoader: ClassLoader) {
-            tryInstallFastFeedSourceHooks(module, classLoader, 0)
-            tryInstallFeedComponentGuard(module, classLoader, "Application.attach")
+        private fun scheduleHookInstallAttempts(classLoader: ClassLoader) {
+            tryInstallFastFeedSourceHooks(classLoader, 0)
+            tryInstallFeedComponentGuard(classLoader, "Application.attach")
 
             FAST_SOURCE_DELAYS_MS.forEachIndexed { index, delay ->
                 val attemptNumber = index + 1
                 sTaskExecutor.schedule({
-                    tryInstallFastFeedSourceHooks(module, classLoader, attemptNumber)
+                    tryInstallFastFeedSourceHooks(classLoader, attemptNumber)
                 }, delay, TimeUnit.MILLISECONDS)
             }
 
             FAST_COMPONENT_DELAYS_MS.forEachIndexed { index, delay ->
                 val attemptNumber = index + 1
                 sTaskExecutor.schedule({
-                    tryInstallFeedComponentGuard(module, classLoader, "component attempt=$attemptNumber")
+                    tryInstallFeedComponentGuard(classLoader, "component attempt=$attemptNumber")
                 }, delay, TimeUnit.MILLISECONDS)
             }
 
             INSTALL_DELAYS_MS.forEachIndexed { index, delay ->
                 val attemptNumber = index + 1
                 sTaskExecutor.schedule({
-                    tryInstallHooks(module, classLoader, attemptNumber)
+                    tryInstallHooks(classLoader, attemptNumber)
                 }, delay, TimeUnit.MILLISECONDS)
             }
         }
 
-        private fun tryInstallFastFeedSourceHooks(module: Module, classLoader: ClassLoader, attemptNumber: Int) {
+        private fun tryInstallFastFeedSourceHooks(classLoader: ClassLoader, attemptNumber: Int) {
             if (!sFastSourceHooksInstalled.get() && sFastInstallInProgress.compareAndSet(false, true)) {
                 try {
-                    if (installFacebook571FeedSourceFastPath(module, classLoader)) {
+                    if (installFacebook571FeedSourceFastPath(classLoader)) {
                         sFastSourceHooksInstalled.set(true)
                         debugLogInfo("FB 571 decoded response hooks installed on attempt=$attemptNumber")
                     }
@@ -230,16 +235,16 @@ class Module : XposedModule() {
                     sFastInstallInProgress.set(false)
                 }
             }
-            tryInstallFeedComponentGuard(module, classLoader, "source attempt=$attemptNumber")
+            tryInstallFeedComponentGuard(classLoader, "source attempt=$attemptNumber")
             removeClassLoadNotifierHook()
         }
 
-        private fun tryInstallFeedComponentGuard(module: Module, classLoader: ClassLoader, readinessSource: String) {
+        private fun tryInstallFeedComponentGuard(classLoader: ClassLoader, readinessSource: String) {
             if (sFeedComponentGuardInstalled.get() || !sComponentGuardInstallInProgress.compareAndSet(false, true)) {
                 return
             }
             try {
-                if (installFacebook571FeedComponentGuard(module, classLoader)) {
+                if (installFacebook571FeedComponentGuard(classLoader)) {
                     sFeedComponentGuardInstalled.set(true)
                     debugLogInfo("FB 571 sponsored feed component guard installed at $readinessSource")
                 }
@@ -250,7 +255,7 @@ class Module : XposedModule() {
             }
         }
 
-        private fun tryInstallHooks(module: Module, classLoader: ClassLoader, attemptNumber: Int) {
+        private fun tryInstallHooks(classLoader: ClassLoader, attemptNumber: Int) {
             if (sHooksInstalled.get() || !sInstallInProgress.compareAndSet(false, true)) {
                 return
             }
@@ -259,9 +264,9 @@ class Module : XposedModule() {
                 ensureDexKitLoaded()
                 DexKitBridge.create(classLoader, false).use { bridge ->
                     debugLogInfo("Scanning Facebook secondary dex, attempt=$attemptNumber")
-                    if (installFacebookAdRemover(module, classLoader, bridge)) {
+                    if (installFacebookAdRemover(classLoader, bridge)) {
                         sHooksInstalled.set(true)
-                        tryInstallFeedComponentGuard(module, classLoader, "full DexKit readiness")
+                        tryInstallFeedComponentGuard(classLoader, "full DexKit readiness")
                         removeClassLoadNotifierHook()
                         debugLogInfo("Facebook ad remover hooks installed on attempt=$attemptNumber")
                     }

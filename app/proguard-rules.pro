@@ -8,9 +8,7 @@
 # LSPosed 透過 assets/xposed_init 的類別全名字串反射載入進入點，
 # R8 看不到這個引用關係，必須明確 keep 住，否則 release 版會被改名/砍掉導致模組載入失敗
 -keep class tn.loukious.facebookappadsremover.Module { *; }
--keep class * extends io.github.libxposed.api.XposedModule
--keep class io.github.libxposed.api.** { *; }
--dontwarn io.github.libxposed.api.**
+-keep class * implements de.robv.android.xposed.IXposedHookLoadPackage
 
 # 如果您的專案在 WebView 中使用 JavaScript 介面，請取消註解以下內容並指定類別路徑
 #-keepclassmembers class fqcn.of.javascript.interface.for.webview {

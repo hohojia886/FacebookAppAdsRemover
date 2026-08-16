@@ -7,8 +7,8 @@ import android.os.Bundle
 import android.view.View
 import android.view.ViewGroup
 import android.widget.TextView
-import io.github.libxposed.api.XposedModule
-import io.github.libxposed.api.XposedInterface
+import de.robv.android.xposed.XC_MethodHook
+import de.robv.android.xposed.XposedBridge
 import java.lang.reflect.Field
 import java.lang.reflect.Method
 import java.lang.reflect.Modifier
@@ -49,7 +49,7 @@ internal data class AudienceNetworkGraphNode(
     val depth: Int
 )
 
-internal fun hookAudienceNetworkViewDiagnostics(module: XposedModule) {
+internal fun hookAudienceNetworkViewDiagnostics() {
     if (!ENABLE_AUDIENCE_NETWORK_VIEW_DIAGNOSTICS ||
         !audienceNetworkViewDiagnosticsInstalled.compareAndSet(0, 1)
     ) {
@@ -72,40 +72,38 @@ internal fun hookAudienceNetworkViewDiagnostics(module: XposedModule) {
     viewMethods.forEach { method ->
         runCatching {
             method.isAccessible = true
-            module.hook(method).intercept { chain ->
-                val view = chain.thisObject as? View
-                if (view != null) {
-                    val shouldLogView = shouldLogAudienceNetworkViewDiagnostic(view, chain.args.toTypedArray())
-                    chain.args.getOrNull(0)?.takeIf {
+            XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    val view = param.thisObject as? View ?: return
+                    val shouldLogView = shouldLogAudienceNetworkViewDiagnostic(view, param.args)
+                    param.args.getOrNull(0)?.takeIf {
                         shouldLogView || shouldHookAudienceNetworkListenerClass(it.javaClass.name)
                     }?.let { listener ->
-                        tryHookAudienceNetworkViewListenerClass(module, listener.javaClass, "View.${method.name}")
+                        tryHookAudienceNetworkViewListenerClass(listener.javaClass, "View.${method.name}")
                     }
                     findViewOnClickListener(view)?.takeIf {
                         shouldLogView || shouldHookAudienceNetworkListenerClass(it.javaClass.name)
                     }?.let { listener ->
-                        tryHookAudienceNetworkViewListenerClass(module, listener.javaClass, "View.${method.name}.existingClick")
+                        tryHookAudienceNetworkViewListenerClass(listener.javaClass, "View.${method.name}.existingClick")
                     }
                     findViewOnTouchListener(view)?.takeIf {
                         shouldLogView || shouldHookAudienceNetworkListenerClass(it.javaClass.name)
                     }?.let { listener ->
-                        tryHookAudienceNetworkViewListenerClass(module, listener.javaClass, "View.${method.name}.existingTouch")
+                        tryHookAudienceNetworkViewListenerClass(listener.javaClass, "View.${method.name}.existingTouch")
                     }
-                    
-                    if (shouldLogView) {
-                        markGameAdDiagnosticFlow("anView.${method.name} ${view.javaClass.name}")
-                        logGameAdDiagnostic(
-                            "anView.${method.name}.before",
-                            "${methodSignature(method)} ${describeAudienceNetworkView(view)} args=${formatDiagArgs(chain.args.toTypedArray())}"
-                        )
-                    }
+                    if (!shouldLogView) return
+
+                    markGameAdDiagnosticFlow("anView.${method.name} ${view.javaClass.name}")
+                    logGameAdDiagnostic(
+                        "anView.${method.name}.before",
+                        "${methodSignature(method)} ${describeAudienceNetworkView(view)} args=${formatDiagArgs(param.args)}"
+                    )
                 }
-                
-                val result = chain.proceed()
-                
-                if (view != null) {
+
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    val view = param.thisObject as? View ?: return
                     if (ENABLE_AUDIENCE_NETWORK_AUTO_EXIT_WHEN_READY && method.name == "setOnClickListener") {
-                        val listenerName = chain.args.getOrNull(0)?.javaClass?.name.orEmpty()
+                        val listenerName = param.args.getOrNull(0)?.javaClass?.name.orEmpty()
                         if (isAudienceNetworkFinalExitListener(listenerName)) {
                             scheduleAudienceNetworkRegisteredExitClick(
                                 view,
@@ -113,15 +111,14 @@ internal fun hookAudienceNetworkViewDiagnostics(module: XposedModule) {
                             )
                         }
                     }
-                    if (shouldLogAudienceNetworkViewDiagnostic(view, chain.args.toTypedArray()) || isRecentGameAdDiagnosticFlow()) {
-                        logGameAdDiagnostic(
-                            "anView.${method.name}.after",
-                            "${methodSignature(method)} result=${formatDiagValue(result)} throwable=none ${describeAudienceNetworkView(view)}"
-                        )
-                    }
+                    if (!shouldLogAudienceNetworkViewDiagnostic(view, param.args) && !isRecentGameAdDiagnosticFlow()) return
+
+                    logGameAdDiagnostic(
+                        "anView.${method.name}.after",
+                        "${methodSignature(method)} result=${formatDiagValue(param.result)} throwable=${formatDiagThrowable(param.throwable)} ${describeAudienceNetworkView(view)}"
+                    )
                 }
-                result
-            }
+            })
         }.onFailure {
             Logger.w(TAG, "Failed to hook Audience Network view diagnostic ${method.declaringClass.name}.${method.name}", it)
         }
@@ -154,7 +151,7 @@ internal fun dumpAudienceNetworkActivityState(activity: Activity, source: String
     )
     dumpAudienceNetworkIntentExtras(activity.intent, source)
     dumpAudienceNetworkViewState(activity, source)
-    // dumpAudienceNetworkObjectGraph is skipped to avoid complexity in dynamic module passing during recursion.
+    dumpAudienceNetworkObjectGraph(activity, source)
 }
 
 internal fun dumpAudienceNetworkIntentExtras(intent: Intent?, source: String) {
@@ -185,7 +182,10 @@ internal fun dumpAudienceNetworkViewState(activity: Activity, source: String) {
     fun visit(view: View, depth: Int) {
         if (logged < 80 && shouldDescribeAudienceNetworkViewInTree(view)) {
             findViewOnClickListener(view)?.let { listener ->
-                // Note: Missing module here, skipping dynamic hooking in tree visitor.
+                tryHookAudienceNetworkViewListenerClass(listener.javaClass, "viewTree.clickListener")
+            }
+            findViewOnTouchListener(view)?.let { listener ->
+                tryHookAudienceNetworkViewListenerClass(listener.javaClass, "viewTree.touchListener")
             }
             logged++
             logGameAdDiagnostic(
@@ -203,16 +203,76 @@ internal fun dumpAudienceNetworkViewState(activity: Activity, source: String) {
     visit(root, 0)
 }
 
-internal fun tryHookAudienceNetworkDiagnosticObjectClass(module: XposedModule, clazz: Class<*>, source: String) {
+internal fun dumpAudienceNetworkObjectGraph(activity: Activity, source: String) {
+    val seen = IdentityHashMap<Any, Boolean>()
+    val queue = java.util.ArrayDeque<AudienceNetworkGraphNode>()
+    queue.add(AudienceNetworkGraphNode(activity, "activity", 0))
+
+    var inspected = 0
+    var logged = 0
+    while (!queue.isEmpty() && inspected < AUDIENCE_NETWORK_STATE_DUMP_LIMIT && logged < AUDIENCE_NETWORK_STATE_DUMP_LIMIT) {
+        val node = queue.removeFirst()
+        val value = node.value
+        if (seen.put(value, true) != null) continue
+        inspected++
+
+        if (value !== activity) {
+            logged++
+            tryHookAudienceNetworkDiagnosticObjectClass(value.javaClass, "graph ${node.path}")
+            logGameAdDiagnostic(
+                "anActivity.object",
+                "$source ${node.path}=${formatDiagValue(value)} methods=${audienceNetworkInterestingMethodsSummary(value.javaClass)}"
+            )
+        }
+
+        if (node.depth >= 4) continue
+
+        audienceNetworkFieldsFor(value.javaClass).forEach { field ->
+            val fieldValue = runCatching { field.get(value) }.getOrNull() ?: return@forEach
+            val fieldPath = "${node.path}.${field.name}"
+            when (fieldValue) {
+                is View -> {
+                    tryHookAudienceNetworkDiagnosticObjectClass(fieldValue.javaClass, "graph view $fieldPath")
+                    logGameAdDiagnostic(
+                        "anActivity.field",
+                        "$source $fieldPath=${describeAudienceNetworkView(fieldValue)}"
+                    )
+                }
+                is Iterable<*> -> fieldValue.take(12).forEachIndexed { index, item ->
+                    if (item != null && shouldQueueAudienceNetworkDiagnosticObject(item)) {
+                        queue.add(AudienceNetworkGraphNode(item, "$fieldPath[$index]", node.depth + 1))
+                    }
+                }
+                is Array<*> -> fieldValue.take(12).forEachIndexed { index, item ->
+                    if (item != null && shouldQueueAudienceNetworkDiagnosticObject(item)) {
+                        queue.add(AudienceNetworkGraphNode(item, "$fieldPath[$index]", node.depth + 1))
+                    }
+                }
+                else -> if (shouldQueueAudienceNetworkDiagnosticObject(fieldValue)) {
+                    queue.add(AudienceNetworkGraphNode(fieldValue, fieldPath, node.depth + 1))
+                } else if (isGameAdDiagnosticValue(fieldValue)) {
+                    logGameAdDiagnostic(
+                        "anActivity.field",
+                        "$source $fieldPath=${formatDiagValue(fieldValue)}"
+                    )
+                }
+            }
+        }
+    }
+
+    logGameAdDiagnostic("anActivity.dumpDone", "$source inspected=$inspected logged=$logged")
+}
+
+internal fun tryHookAudienceNetworkDiagnosticObjectClass(clazz: Class<*>, source: String) {
     if (isGameAdDiagnosticClassName(clazz.name)) {
-        tryHookGameAdDiagnosticClass(module, clazz)
+        tryHookGameAdDiagnosticClass(clazz)
     }
     if (isPotentialAudienceNetworkAppClass(clazz.name)) {
-        tryHookAudienceNetworkViewListenerClass(module, clazz, source)
+        tryHookAudienceNetworkViewListenerClass(clazz, source)
     }
 }
 
-internal fun tryHookAudienceNetworkViewListenerClass(module: XposedModule, clazz: Class<*>, source: String) {
+internal fun tryHookAudienceNetworkViewListenerClass(clazz: Class<*>, source: String) {
     val className = clazz.name
     if (!shouldHookAudienceNetworkListenerClass(className) ||
         !audienceNetworkViewListenerClassesHooked.add(className)
@@ -229,25 +289,24 @@ internal fun tryHookAudienceNetworkViewListenerClass(module: XposedModule, clazz
         .forEach { method ->
             runCatching {
                 method.isAccessible = true
-                module.hook(method).intercept { chain ->
-                    if (shouldLogAudienceNetworkListenerCall(method, chain.args.toTypedArray())) {
+                XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        if (!shouldLogAudienceNetworkListenerCall(method, param.args)) return
                         markGameAdDiagnosticFlow("anListener.${method.name} ${method.declaringClass.name}")
                         logGameAdDiagnostic(
                             "anListener.${method.name}.before",
-                            "${methodSignature(method)} this=${formatDiagValue(chain.thisObject)} args=${formatDiagArgs(chain.args.toTypedArray())}"
+                            "${methodSignature(method)} this=${formatDiagValue(param.thisObject)} args=${formatDiagArgs(param.args)}"
                         )
                     }
-                    
-                    val result = chain.proceed()
-                    
-                    if (shouldLogAudienceNetworkListenerCall(method, chain.args.toTypedArray()) || isRecentGameAdDiagnosticFlow()) {
+
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        if (!shouldLogAudienceNetworkListenerCall(method, param.args) && !isRecentGameAdDiagnosticFlow()) return
                         logGameAdDiagnostic(
                             "anListener.${method.name}.after",
-                            "${methodSignature(method)} result=${formatDiagValue(result)} throwable=none"
+                            "${methodSignature(method)} result=${formatDiagValue(param.result)} throwable=${formatDiagThrowable(param.throwable)}"
                         )
                     }
-                    result
-                }
+                })
                 hooked++
             }.onFailure {
                 Logger.w(TAG, "Failed to hook Audience Network listener diagnostic ${clazz.name}.${method.name}", it)
@@ -360,6 +419,42 @@ internal fun audienceNetworkParentPath(view: View): String {
     return names.joinToString(">")
 }
 
+internal fun shouldQueueAudienceNetworkDiagnosticObject(value: Any): Boolean {
+    if (value is View ||
+        value is Activity ||
+        value is String ||
+        value is Number ||
+        value is Boolean ||
+        value is CharSequence
+    ) {
+        return false
+    }
+
+    val type = value.javaClass
+    if (type.isPrimitive || type.isEnum) return false
+    val className = type.name
+    if (className.startsWith("android.") ||
+        className.startsWith("java.") ||
+        className.startsWith("javax.") ||
+        className.startsWith("kotlin.") ||
+        className.startsWith("dalvik.") ||
+        className.startsWith("libcore.")
+    ) {
+        return false
+    }
+
+    return shouldTraverseAudienceNetworkObject(value, false) ||
+        isPotentialAudienceNetworkAppClass(className) ||
+        className.hasGameAdSignal()
+}
+
+internal fun isPotentialAudienceNetworkAppClass(className: String): Boolean {
+    return className.startsWith("com.facebook.") ||
+        className.startsWith("X.") ||
+        className.startsWith("p000X.") ||
+        className.hasGameAdSignal()
+}
+
 internal fun shouldHookAudienceNetworkListenerClass(className: String): Boolean {
     return className in AUDIENCE_NETWORK_CLOSE_LISTENER_CLASS_NAMES ||
         className.isFocusedAudienceNetworkClassName() ||
@@ -452,7 +547,7 @@ internal fun String.hasAudienceNetworkViewSignal(): Boolean {
         normalized.contains("com.facebook.ads")
 }
 
-internal fun hookAudienceNetworkRewardFallbacks(module: XposedModule, classLoader: ClassLoader) {
+internal fun hookAudienceNetworkRewardFallbacks(classLoader: ClassLoader) {
     if (!audienceNetworkRewardHooksInstalled.compareAndSet(0, 1)) return
 
     listOf(
@@ -463,7 +558,7 @@ internal fun hookAudienceNetworkRewardFallbacks(module: XposedModule, classLoade
         "com.facebook.ads.RewardedVideoAd\$RewardedVideoAdLoadConfigBuilder",
         "com.facebook.ads.RewardedInterstitialAd\$RewardedInterstitialAdLoadConfigBuilder"
     ).forEach { className ->
-        runCatching { tryHookAudienceNetworkRewardClass(module, classLoader.loadClass(className)) }
+        runCatching { tryHookAudienceNetworkRewardClass(classLoader.loadClass(className)) }
     }
 
     (ClassLoader::class.java.declaredMethods + ClassLoader::class.java.methods)
@@ -472,23 +567,25 @@ internal fun hookAudienceNetworkRewardFallbacks(module: XposedModule, classLoade
                 method.parameterTypes.isNotEmpty() &&
                 method.parameterTypes[0] == String::class.java
         }
-        .distinctBy { methodSignature(it) }
+        .distinctBy { method ->
+            method.name + method.parameterTypes.joinToString(prefix = "(", postfix = ")") { it.name }
+        }
         .forEach { method ->
             method.isAccessible = true
-            module.hook(method).intercept { chain ->
-                val result = chain.proceed()
-                val clazz = result as? Class<*>
-                if (clazz != null && isAudienceNetworkRewardRelevantClass(clazz.name)) {
-                    tryHookAudienceNetworkRewardClass(module, clazz)
+            XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    val clazz = param.result as? Class<*> ?: return
+                    if (isAudienceNetworkRewardRelevantClass(clazz.name)) {
+                        tryHookAudienceNetworkRewardClass(clazz)
+                    }
                 }
-                result
-            }
+            })
         }
 
     Logger.i(TAG, "Hooked Audience Network reward dynamic class fallback")
 }
 
-internal fun tryHookAudienceNetworkRewardClass(module: XposedModule, clazz: Class<*>) {
+internal fun tryHookAudienceNetworkRewardClass(clazz: Class<*>) {
     val className = clazz.name
     if (!isAudienceNetworkRewardRelevantClass(className) ||
         !audienceNetworkRewardClassesHooked.add(className)
@@ -504,68 +601,77 @@ internal fun tryHookAudienceNetworkRewardClass(module: XposedModule, clazz: Clas
         runCatching {
             method.isAccessible = true
             if (isAudienceNetworkRewardShowMethod(clazz, method)) {
-                module.hook(method).intercept { chain ->
-                    val adObject = chain.thisObject
-                    if (adObject != null) {
+                XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        val adObject = param.thisObject ?: return
                         markGameAdDiagnosticFlow("anReward.show ${method.declaringClass.name}.${method.name}")
                         logGameAdDiagnostic(
                             "anReward.show.before",
-                            "${methodSignature(method)} this=${formatDiagValue(adObject)} args=${formatDiagArgs(chain.args.toTypedArray())}"
+                            "${methodSignature(method)} this=${formatDiagValue(adObject)} args=${formatDiagArgs(param.args)}"
                         )
-                        if (ENABLE_GAME_AD_AUTOFIX) {
-                            if (completeAudienceNetworkRewardObject(adObject, "show ${method.declaringClass.name}.${method.name}")) {
-                                Logger.i(TAG, "Skipped Audience Network rewarded show via ${method.declaringClass.name}.${method.name}")
-                                return@intercept when (method.returnType) {
-                                    Boolean::class.javaPrimitiveType, Boolean::class.java -> true
-                                    else -> null
-                                }
-                            }
+                        if (!ENABLE_GAME_AD_AUTOFIX) return
+
+                        if (!completeAudienceNetworkRewardObject(
+                                adObject,
+                                "show ${method.declaringClass.name}.${method.name}"
+                            )
+                        ) {
+                            return
                         }
+
+                        param.result = when (method.returnType) {
+                            Boolean::class.javaPrimitiveType, Boolean::class.java -> true
+                            else -> null
+                        }
+                        Logger.i(TAG, "Skipped Audience Network rewarded show via ${method.declaringClass.name}.${method.name}")
                     }
-                    
-                    val result = chain.proceed()
-                    logGameAdDiagnostic(
-                        "anReward.show.after",
-                        "${methodSignature(method)} result=${formatDiagValue(result)} throwable=none"
-                    )
-                    result
-                }
+
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        logGameAdDiagnostic(
+                            "anReward.show.after",
+                            "${methodSignature(method)} result=${formatDiagValue(param.result)} throwable=${formatDiagThrowable(param.throwable)}"
+                        )
+                    }
+                })
                 hooked++
             } else if (isAudienceNetworkRewardListenerRegistrationMethod(method)) {
-                module.hook(method).intercept { chain ->
-                    logGameAdDiagnostic(
-                        "anReward.listener.before",
-                        "${methodSignature(method)} this=${formatDiagValue(chain.thisObject)} args=${formatDiagArgs(chain.args.toTypedArray())}"
-                    )
-                    rememberAudienceNetworkRewardListeners(chain.thisObject, chain.args.toTypedArray(), method)
-                    
-                    val result = chain.proceed()
-                    
-                    rememberAudienceNetworkRewardListeners(chain.thisObject, chain.args.toTypedArray(), method)
-                    rememberAudienceNetworkRewardListeners(result, chain.args.toTypedArray(), method)
-                    logGameAdDiagnostic(
-                        "anReward.listener.after",
-                        "${methodSignature(method)} result=${formatDiagValue(result)} throwable=none"
-                    )
-                    result
-                }
+                XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        logGameAdDiagnostic(
+                            "anReward.listener.before",
+                            "${methodSignature(method)} this=${formatDiagValue(param.thisObject)} args=${formatDiagArgs(param.args)}"
+                        )
+                        rememberAudienceNetworkRewardListeners(param.thisObject, param.args, method)
+                    }
+
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        rememberAudienceNetworkRewardListeners(param.thisObject, param.args, method)
+                        rememberAudienceNetworkRewardListeners(param.result, param.args, method)
+                        logGameAdDiagnostic(
+                            "anReward.listener.after",
+                            "${methodSignature(method)} result=${formatDiagValue(param.result)} throwable=${formatDiagThrowable(param.throwable)}"
+                        )
+                    }
+                })
                 hooked++
             } else if (isAudienceNetworkRewardLoadMethod(clazz, method)) {
-                module.hook(method).intercept { chain ->
-                    markGameAdDiagnosticFlow("anReward.load ${method.declaringClass.name}.${method.name}")
-                    logGameAdDiagnostic(
-                        "anReward.load.before",
-                        "${methodSignature(method)} this=${formatDiagValue(chain.thisObject)} args=${formatDiagArgs(chain.args.toTypedArray())}"
-                    )
-                    rememberAudienceNetworkRewardListeners(chain.thisObject, chain.args.toTypedArray(), method)
-                    
-                    val result = chain.proceed()
-                    logGameAdDiagnostic(
-                        "anReward.load.after",
-                        "${methodSignature(method)} result=${formatDiagValue(result)} throwable=none"
-                    )
-                    result
-                }
+                XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        markGameAdDiagnosticFlow("anReward.load ${method.declaringClass.name}.${method.name}")
+                        logGameAdDiagnostic(
+                            "anReward.load.before",
+                            "${methodSignature(method)} this=${formatDiagValue(param.thisObject)} args=${formatDiagArgs(param.args)}"
+                        )
+                        rememberAudienceNetworkRewardListeners(param.thisObject, param.args, method)
+                    }
+
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        logGameAdDiagnostic(
+                            "anReward.load.after",
+                            "${methodSignature(method)} result=${formatDiagValue(param.result)} throwable=${formatDiagThrowable(param.throwable)}"
+                        )
+                    }
+                })
                 hooked++
             }
         }.onFailure {
@@ -1024,13 +1130,6 @@ internal fun audienceNetworkMethodsFor(type: Class<*>): List<Method> {
         current = current.superclass
     }
     return methods.values.toList()
-}
-
-internal fun isPotentialAudienceNetworkAppClass(className: String): Boolean {
-    return className.startsWith("com.facebook.") ||
-        className.startsWith("X.") ||
-        className.startsWith("p000X.") ||
-        className.hasGameAdSignal()
 }
 
 internal fun shouldQueueAudienceNetworkObject(value: Any): Boolean {

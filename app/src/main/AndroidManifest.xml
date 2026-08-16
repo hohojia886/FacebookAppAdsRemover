@@ -20,16 +20,16 @@
             android:value="@string/xposed_description" />
         <meta-data
             android:name="xposedminversion"
-            android:value="102" />
-        <meta-data
-            android:name="xposedscope"
-            android:value="com.facebook.katana" />
+            android:value="101" />
         <meta-data
             android:name="xposedmoduleapi"
-            android:value="102" />
+            android:value="101" />
         <meta-data
             android:name="xposedstatic"
             android:value="true" />
+        <meta-data
+            android:name="xposedscope"
+            android:value="com.facebook.katana" />
 
     </application>
 
