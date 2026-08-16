@@ -19,13 +19,7 @@
             android:value="An Xposed module that removes ads from the Facebook app." />
         <meta-data
             android:name="xposedminversion"
-            android:value="93" />
-        <meta-data
-            android:name="xposedsharedprefs"
-            android:value="false" />
-        <meta-data
-            android:name="xposedscope"
-            android:value="com.facebook.katana" />
+            android:value="101" />
 
     </application>
 
