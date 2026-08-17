@@ -1,5 +1,3 @@
 <resources>
     <string name="app_name">Facebook App Ads Remover</string>
-    <string name="xposed_scope">com.facebook.katana</string>
-    <string name="xposed_description">An Xposed module that removes ads from the Facebook app.</string>
 </resources>

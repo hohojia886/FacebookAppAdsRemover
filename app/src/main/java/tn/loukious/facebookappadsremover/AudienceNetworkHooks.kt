@@ -1,493 +1,348 @@
 package tn.loukious.facebookappadsremover
 
 import android.app.Activity
-import android.content.Intent
-import android.os.Bundle
-import android.os.Handler
 import android.view.View
-import android.view.ViewGroup
-import android.widget.TextView
 import io.github.libxposed.api.XposedModule
-import io.github.libxposed.api.XposedInterface
 import java.lang.reflect.Field
 import java.lang.reflect.Method
 import java.lang.reflect.Modifier
-import java.util.ArrayDeque
-import java.util.Collections
 import java.util.IdentityHashMap
-import java.util.LinkedHashMap
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicInteger
 
-internal val AUDIENCE_NETWORK_REWARD_COMPLETION_METHOD_NAMES = setOf(
-    "onRewardServerSuccess",
-    "onRewardServerFailed",
-    "onRewardedVideoCompleted",
-    "onRewardedVideoClosed",
-    "onRewardServerResponse"
-)
+fun hookAudienceNetworkRewardFallbacks(module: XposedModule, classLoader: ClassLoader) {
+    if (!audienceNetworkRewardHooksInstalled.compareAndSet(0, 1)) return
 
-internal val AUDIENCE_NETWORK_CLOSE_LISTENER_CLASS_NAMES = setOf(
-    "com.facebook.ads.internal.api.AdCloseListener",
-    "com.facebook.ads.internal.api.RewardedVideoAdApi\$RewardedVideoAdListener",
-    "com.facebook.ads.RewardedVideoAdListener"
-)
-
-internal val AUDIENCE_NETWORK_FOCUSED_DIAGNOSTIC_CLASS_NAMES = setOf(
-    "com.facebook.ads.internal.api.AdViewApi",
-    "com.facebook.ads.internal.api.RewardedVideoAdApi",
-    "com.facebook.ads.internal.api.InterstitialAdApi",
-    "com.facebook.ads.AdView",
-    "com.facebook.ads.RewardedVideoAd",
-    "com.facebook.ads.InterstitialAd"
-)
-
-internal data class AudienceNetworkGraphNode(
-    val value: Any,
-    val path: String,
-    val depth: Int
-)
-
-internal fun hookAudienceNetworkViewDiagnostics(module: XposedModule) {
-    if (!ENABLE_AUDIENCE_NETWORK_VIEW_DIAGNOSTICS || audienceNetworkViewDiagnosticsInstalled.getAndIncrement() != 0) return
-
-    val viewClass = View::class.java
-    (viewClass.declaredMethods + viewClass.methods)
-        .filter { it.name == "onAttachedToWindow" && it.parameterCount == 0 }
-        .distinctBy { methodSignature(it) }
-        .forEach { method ->
-            module.hook(method).intercept { chain ->
-                val res = chain.proceed()
-                val view = chain.thisObject as? View ?: return@intercept res
-                if (shouldLogAudienceNetworkViewDiagnostic(view, null)) {
-                    val activity = runCatching { view.context as? Activity }.getOrNull()
-                    activity?.let { dumpAudienceNetworkActivityState(it, "view attach ${view.javaClass.name}") }
-                }
-                res
-            }
-        }
-
-    val activityClass = Activity::class.java
-    (activityClass.declaredMethods + activityClass.methods)
-        .filter { it.name == "onCreate" && it.parameterCount == 1 && it.parameterTypes[0] == Bundle::class.java }
-        .distinctBy { methodSignature(it) }
-        .forEach { method ->
-            module.hook(method).intercept { chain ->
-                val res = chain.proceed()
-                val activity = chain.thisObject as? Activity ?: return@intercept res
-                if (activity.javaClass.name == AUDIENCE_NETWORK_ACTIVITY_CLASS) {
-                    dumpAudienceNetworkActivityState(activity, "activity create")
-                }
-                res
-            }
-        }
-
-    Logger.i(TAG, "Audience Network view diagnostics active")
-}
-
-internal fun dumpAudienceNetworkActivityState(activity: Activity, reason: String) {
-    if (audienceNetworkActivityStateDumps.containsKey(activity)) return
-    audienceNetworkActivityStateDumps[activity] = System.currentTimeMillis()
-
-    Logger.i(TAG, "--- Audience Network Activity State Dump ($reason) ---")
-    Logger.i(TAG, "Activity: ${activity.javaClass.name} tasksId=${activity.taskId}")
-    dumpAudienceNetworkIntentExtras(activity.intent, "Activity Intent")
-    dumpAudienceNetworkViewState(activity, "Activity View Tree")
-    
-    runCatching {
-        val fragments = invokeMethodByName(activity, "getSupportFragmentManager") ?: invokeMethodByName(activity, "getFragmentManager")
-        fragments?.let { Logger.i(TAG, "Fragments: ${it.javaClass.name}") }
-    }
-    
-    val adObjects = findAudienceNetworkRewardListeners(activity)
-    adObjects.forEach { obj ->
-        Logger.i(TAG, "Found relevant object in activity: ${obj.javaClass.name} hash=${System.identityHashCode(obj)}")
-    }
-    Logger.i(TAG, "--- End State Dump ---")
-}
-
-internal fun dumpAudienceNetworkIntentExtras(intent: Intent?, label: String) {
-    if (intent == null) return
-    val extras = intent.extras ?: return
-    Logger.i(TAG, "$label extras keys=${extras.keySet().joinToString()}")
-    extras.keySet().forEach { key ->
-        val value = extras.get(key)
-        Logger.i(TAG, "  $key = ${if (value is Bundle) "Bundle{...}" else value?.toString()}")
-    }
-}
-
-internal fun dumpAudienceNetworkViewState(activity: Activity, source: String) {
-    val root = activity.window?.decorView ?: return
-    val queue = ArrayDeque<Pair<View, Int>>()
-    queue.add(root to 0)
-    
-    var count = 0
-    while (queue.isNotEmpty() && count < AUDIENCE_NETWORK_STATE_DUMP_LIMIT) {
-        val (view, depth) = queue.removeFirst()
-        if (shouldDescribeAudienceNetworkViewInTree(view)) {
-            Logger.i(TAG, "$source depth=$depth ${describeAudienceNetworkView(view)}")
-        }
-        
-        if (view is ViewGroup) {
-            for (i in 0 until view.childCount) {
-                queue.add(view.getChildAt(i) to depth + 1)
-            }
-        }
-        count++
-    }
-}
-
-internal fun tryHookAudienceNetworkDiagnosticObjectClass(module: XposedModule, clazz: Class<*>, source: String) {
-    if (!audienceNetworkViewListenerClassesHooked.add(clazz.name)) return
-    
-    Logger.i(TAG, "Hooking interesting Audience Network class: ${clazz.name} from $source")
-    (clazz.declaredMethods + clazz.methods).forEach { method ->
-        if (isAudienceNetworkViewListenerDiagnosticMethod(method)) {
-            module.hook(method).intercept { chain ->
-                if (shouldLogAudienceNetworkListenerCall(method, chain.args.toTypedArray())) {
-                    Logger.i(TAG, "Audience Network Call: ${method.name}(${chain.args.joinToString()}) on ${chain.thisObject?.javaClass?.name}")
-                }
-                chain.proceed()
-            }
-        }
-    }
-}
-
-internal fun tryHookAudienceNetworkViewListenerClass(module: XposedModule, clazz: Class<*>, source: String) {
-    if (!audienceNetworkViewListenerClassesHooked.add(clazz.name)) return
-
-    Logger.i(TAG, "Hooking Audience Network view listener: ${clazz.name} from $source")
-    (clazz.declaredMethods + clazz.methods).forEach { method ->
-        if (isAudienceNetworkViewListenerDiagnosticMethod(method)) {
-            module.hook(method).intercept { chain ->
-                val view = chain.args.firstOrNull { it is View } as? View
-                if (shouldLogAudienceNetworkViewDiagnostic(view, chain.args.toTypedArray())) {
-                    Logger.i(TAG, "Audience Network View Event: ${method.name} view=${view?.javaClass?.name} args=${chain.args.joinToString()}")
-                    view?.let { Logger.i(TAG, "  View Details: ${describeAudienceNetworkView(it)}") }
-                }
-                chain.proceed()
-            }
-        }
-    }
-}
-
-internal fun isAudienceNetworkViewListenerDiagnosticMethod(method: Method): Boolean {
-    val name = method.name.lowercase()
-    return name.contains("ad") && (
-        name.contains("click") || 
-        name.contains("load") || 
-        name.contains("error") || 
-        name.contains("impression") || 
-        name.contains("close") ||
-        name.contains("finish")
-    )
-}
-
-internal fun shouldLogAudienceNetworkListenerCall(method: Method, args: Array<Any?>?): Boolean {
-    if (!ENABLE_AUDIENCE_NETWORK_VIEW_DIAGNOSTICS) return false
-    return method.name.lowercase().contains("error") || (args?.any { it != null } == true)
-}
-
-internal fun shouldLogAudienceNetworkViewDiagnostic(view: View?, args: Array<Any?>?): Boolean {
-    if (!ENABLE_AUDIENCE_NETWORK_VIEW_DIAGNOSTICS) return false
-    if (view == null) return args?.any { it != null } == true
-    val name = view.javaClass.name.lowercase()
-    return name.contains("ad") || name.contains("fb") || name.contains("native")
-}
-
-internal fun shouldDescribeAudienceNetworkViewInTree(view: View): Boolean {
-    if (view is ViewGroup && view.childCount > 0) return true
-    if (view is TextView && view.text.isNotBlank()) return true
-    val name = view.javaClass.name.lowercase()
-    return name.contains("ad") || name.contains("button") || name.contains("image") || view.contentDescription?.isNotBlank() == true
-}
-
-internal fun describeAudienceNetworkView(view: View): String {
-    val out = StringBuilder()
-    out.append(view.javaClass.name)
-    out.append(" id=0x${Integer.toHexString(view.id)}")
-    out.append(" vis=${when(view.visibility) { View.VISIBLE -> "V"; View.INVISIBLE -> "I"; else -> "G" }}")
-    out.append(" bounds=[${view.left},${view.top}-${view.right},${view.bottom}]")
-    if (view is TextView) out.append(" text=\"${view.text.take(32)}\"")
-    view.contentDescription?.let { out.append(" desc=\"$it\"") }
-    
-    val marker = audienceNetworkViewMarker(view)
-    if (marker.isNotBlank()) out.append(" marker=[$marker]")
-    
-    return out.toString()
-}
-
-internal fun audienceNetworkViewMarker(view: View): String {
-    val tokens = ArrayList<String>()
-    if (view.isClickable) tokens.add("clickable")
-    if (view.isFocusable) tokens.add("focusable")
-    
-    val name = view.javaClass.name.lowercase()
-    if (name.contains("close") || name.contains("skip") || name.contains("exit")) tokens.add("exit-candidate")
-    
-    return tokens.joinToString(",")
-}
-
-internal fun audienceNetworkParentPath(view: View): String {
-    val path = StringBuilder()
-    var current: View? = view
-    var depth = 0
-    while (current != null && depth < 8) {
-        path.insert(0, "/${current.javaClass.simpleName}")
-        current = current.parent as? View
-        depth++
-    }
-    return path.toString()
-}
-
-internal fun shouldHookAudienceNetworkListenerClass(className: String): Boolean {
-    return className.contains("com.facebook.ads") && 
-        (className.contains("Listener") || className.contains("Callback"))
-}
-
-internal fun isAudienceNetworkFinalExitListener(className: String): Boolean {
-    return className.contains("RewardedVideoAdListener") || className.contains("InterstitialAdListener")
-}
-
-internal fun isAudienceNetworkClosePromptListener(className: String): Boolean {
-    return className.contains("AdCloseListener")
-}
-
-internal fun scheduleAudienceNetworkRegisteredExitClick(view: View, source: String) {
-    if (scheduledAudienceNetworkExitViews.containsKey(view)) return
-    scheduledAudienceNetworkExitViews[view] = System.currentTimeMillis()
-    
-    Logger.i(TAG, "Scheduling automatic exit click for Audience Network view ($source): ${describeAudienceNetworkView(view)}")
-    view.postDelayed({
-        runCatching {
-            if (view.isAttachedToWindow && view.visibility == View.VISIBLE && isAudienceNetworkFinalExitViewReady(view)) {
-                Logger.i(TAG, "Executing automatic exit click for Audience Network")
-                view.performClick()
-            } else {
-                Logger.i(TAG, "Automatic exit click cancelled: view no longer eligible")
-            }
-        }
-    }, 500L)
-}
-
-internal fun isAudienceNetworkFinalExitViewReady(view: View): Boolean {
-    if (!view.isShown || view.alpha < 0.8f) return false
-    val rect = android.graphics.Rect()
-    if (!view.getGlobalVisibleRect(rect)) return false
-    return rect.width() > 10 && rect.height() > 10
-}
-
-internal fun String.isFocusedAudienceNetworkClassName(): Boolean {
-    return this in AUDIENCE_NETWORK_FOCUSED_DIAGNOSTIC_CLASS_NAMES
-}
-
-internal fun audienceNetworkInterestingMethodsSummary(clazz: Class<*>): String {
-    val interesting = (clazz.declaredMethods + clazz.methods)
-        .filter { !Modifier.isStatic(it.modifiers) && it.parameterCount <= 1 }
-        .map { it.name }
-        .filter { name -> 
-            val lower = name.lowercase()
-            lower.contains("ad") || lower.contains("load") || lower.contains("show") || lower.contains("close")
-        }
-        .distinct()
-        .take(8)
-    return interesting.joinToString()
-}
-
-internal fun String.hasAudienceNetworkViewSignal(): Boolean {
-    val lower = this.lowercase()
-    return lower.contains("audiencenetwork") || 
-        lower.contains("adchoices") || 
-        lower.contains("fbinstant") ||
-        lower.contains("sponsored")
-}
-
-internal fun hookAudienceNetworkRewardFallbacks(module: XposedModule, classLoader: ClassLoader) {
-    if (audienceNetworkRewardHooksInstalled.getAndIncrement() != 0) return
-
-    val loadMethods = mutableListOf<Method>()
-    val classNames = listOf(
+    listOf(
         "com.facebook.ads.RewardedVideoAd",
         "com.facebook.ads.RewardedInterstitialAd",
-        "com.facebook.ads.InterstitialAd"
-    )
-    
-    classNames.forEach { className ->
-        val clazz = runCatching { classLoader.loadClass(className) }.getOrNull() ?: return@forEach
-        (clazz.declaredMethods + clazz.methods)
-            .filter { isAudienceNetworkRewardLoadMethod(clazz, it) }
-            .forEach { method ->
+        "com.facebook.ads.RewardedVideoAdListener",
+        "com.facebook.ads.RewardedInterstitialAdListener",
+        "com.facebook.ads.RewardedVideoAd\$RewardedVideoAdLoadConfigBuilder",
+        "com.facebook.ads.RewardedInterstitialAd\$RewardedInterstitialAdLoadConfigBuilder"
+    ).forEach { className ->
+        runCatching { tryHookAudienceNetworkRewardClass(module, classLoader.loadClass(className)) }
+    }
+
+    (ClassLoader::class.java.declaredMethods + ClassLoader::class.java.methods)
+        .filter { method ->
+            method.name == "loadClass" &&
+                method.parameterTypes.isNotEmpty() &&
+                method.parameterTypes[0] == String::class.java
+        }
+        .distinctBy { method ->
+            method.name + method.parameterTypes.joinToString(prefix = "(", postfix = ")") { it.name }
+        }
+        .forEach { method ->
+            method.isAccessible = true
+            module.hook(method).intercept { chain ->
+                val res = chain.proceed()
+                val clazz = res as? Class<*>
+                if (clazz != null && isAudienceNetworkRewardRelevantClass(clazz.name)) {
+                    tryHookAudienceNetworkRewardClass(module, clazz)
+                }
+                res
+            }
+        }
+
+    Logger.i(TAG, "Hooked Audience Network reward dynamic class fallback")
+}
+
+fun tryHookAudienceNetworkRewardClass(module: XposedModule, clazz: Class<*>) {
+    val className = clazz.name
+    if (!isAudienceNetworkRewardRelevantClass(className) ||
+        !audienceNetworkRewardClassesHooked.add(className)
+    ) {
+        return
+    }
+
+    var hooked = 0
+    val methods = runCatching { clazz.declaredMethods + clazz.methods }.getOrDefault(emptyArray())
+    methods.distinctBy { method ->
+        method.name + method.parameterTypes.joinToString(prefix = "(", postfix = ")") { it.name }
+    }.forEach { method ->
+        runCatching {
+            method.isAccessible = true
+            if (isAudienceNetworkRewardShowMethod(clazz, method)) {
                 module.hook(method).intercept { chain ->
                     val adObject = chain.thisObject ?: return@intercept chain.proceed()
-                    Logger.i(TAG, "Observed Audience Network ad load: ${adObject.javaClass.name}")
-                    tryHookAudienceNetworkRewardClass(module, adObject.javaClass)
-                    chain.proceed()
+                    markGameAdDiagnosticFlow("anReward.show ${method.declaringClass.name}.${method.name}")
+                    logGameAdDiagnostic(
+                        "anReward.show.before",
+                        "${methodSignature(method)} this=${formatDiagValue(adObject)} args=${formatDiagArgs(chain.args)}"
+                    )
+                    
+                    if (ENABLE_GAME_AD_AUTOFIX) {
+                        if (completeAudienceNetworkRewardObject(
+                                adObject,
+                                "show ${method.declaringClass.name}.${method.name}"
+                            )
+                        ) {
+                            Logger.i(TAG, "Skipped Audience Network rewarded show via ${method.declaringClass.name}.${method.name}")
+                            return@intercept when (method.returnType) {
+                                Boolean::class.javaPrimitiveType, Boolean::class.java -> true
+                                else -> null
+                            }
+                        }
+                    }
+
+                    val res = runCatching { chain.proceed() }
+                    logGameAdDiagnostic(
+                        "anReward.show.after",
+                        "${methodSignature(method)} result=${formatDiagValue(res.getOrNull())} throwable=${formatDiagThrowable(res.exceptionOrNull())}"
+                    )
+                    res.getOrThrow()
                 }
-                loadMethods.add(method)
+                hooked++
+            } else if (isAudienceNetworkRewardListenerRegistrationMethod(method)) {
+                module.hook(method).intercept { chain ->
+                    logGameAdDiagnostic(
+                        "anReward.listener.before",
+                        "${methodSignature(method)} this=${formatDiagValue(chain.thisObject)} args=${formatDiagArgs(chain.args)}"
+                    )
+                    rememberAudienceNetworkRewardListeners(chain.thisObject, chain.args, method)
+                    val res = runCatching { chain.proceed() }
+                    rememberAudienceNetworkRewardListeners(chain.thisObject, chain.args, method)
+                    rememberAudienceNetworkRewardListeners(res.getOrNull(), chain.args, method)
+                    logGameAdDiagnostic(
+                        "anReward.listener.after",
+                        "${methodSignature(method)} result=${formatDiagValue(res.getOrNull())} throwable=${formatDiagThrowable(res.exceptionOrNull())}"
+                    )
+                    res.getOrThrow()
+                }
+                hooked++
+            } else if (isAudienceNetworkRewardLoadMethod(clazz, method)) {
+                module.hook(method).intercept { chain ->
+                    markGameAdDiagnosticFlow("anReward.load ${method.declaringClass.name}.${method.name}")
+                    logGameAdDiagnostic(
+                        "anReward.load.before",
+                        "${methodSignature(method)} this=${formatDiagValue(chain.thisObject)} args=${formatDiagArgs(chain.args)}"
+                    )
+                    rememberAudienceNetworkRewardListeners(chain.thisObject, chain.args, method)
+                    val res = runCatching { chain.proceed() }
+                    logGameAdDiagnostic(
+                        "anReward.load.after",
+                        "${methodSignature(method)} result=${formatDiagValue(res.getOrNull())} throwable=${formatDiagThrowable(res.exceptionOrNull())}"
+                    )
+                    res.getOrThrow()
+                }
+                hooked++
             }
+        }.onFailure {
+            Logger.w(TAG, "Failed to hook Audience Network reward method ${clazz.name}.${method.name}", it)
+        }
     }
 
-    if (loadMethods.isNotEmpty()) {
-        Logger.i(TAG, "Audience Network reward load-path hooks installed")
+    if (hooked > 0) {
+        Logger.i(TAG, "Hooked $hooked Audience Network reward method(s) in $className")
     }
 }
 
-internal fun tryHookAudienceNetworkRewardClass(module: XposedModule, clazz: Class<*>) {
-    if (!audienceNetworkRewardClassesHooked.add(clazz.name)) return
+fun isAudienceNetworkRewardRelevantClass(className: String): Boolean {
+    val normalized = className.lowercase()
+    return (normalized.startsWith("com.facebook.ads.") ||
+        normalized.startsWith("com.facebook.audiencenetwork.") ||
+        normalized.contains("audiencenetwork")) &&
+        (
+            normalized.contains("reward") ||
+                normalized.contains("adlistener") ||
+                normalized.contains("adconfig") ||
+                normalized.endsWith(".ad")
+            )
+}
 
-    Logger.i(TAG, "Hooking Audience Network reward-capable class: ${clazz.name}")
-    (clazz.declaredMethods + clazz.methods).forEach { method ->
-        if (isAudienceNetworkRewardShowMethod(clazz, method)) {
-            module.hook(method).intercept { chain ->
-                val adObject = chain.thisObject ?: return@intercept chain.proceed()
-                val activity = chain.args.firstOrNull { it is Activity } as? Activity
-                
-                Logger.i(TAG, "Blocked Audience Network ad show: ${adObject.javaClass.name}")
-                completeAudienceNetworkRewardObject(adObject, "blocked show")
-                
-                activity?.let { forceAudienceNetworkRewardCompletion(it, "intercepted show") }
-                null // Block the ad from showing
-            }
-        } else if (isAudienceNetworkRewardListenerRegistrationMethod(method)) {
-            module.hook(method).intercept { chain ->
-                rememberAudienceNetworkRewardListeners(chain.thisObject, chain.args.toTypedArray(), method)
-                chain.proceed()
+fun isAudienceNetworkRewardShowMethod(clazz: Class<*>, method: Method): Boolean {
+    val className = clazz.name.lowercase()
+    return className.contains("reward") &&
+        method.name == "show" &&
+        !Modifier.isStatic(method.modifiers) &&
+        method.parameterCount <= 1 &&
+        (method.returnType == Void.TYPE ||
+            method.returnType == Boolean::class.javaPrimitiveType ||
+            method.returnType == Boolean::class.java)
+}
+
+fun isAudienceNetworkRewardLoadMethod(clazz: Class<*>, method: Method): Boolean {
+    return clazz.name.lowercase().contains("reward") &&
+        method.name.lowercase().contains("load") &&
+        !Modifier.isStatic(method.modifiers) &&
+        method.parameterCount >= 1
+}
+
+fun isAudienceNetworkRewardListenerRegistrationMethod(method: Method): Boolean {
+    if (Modifier.isStatic(method.modifiers) || method.parameterCount == 0) return false
+    val name = method.name.lowercase()
+    if (name.contains("listener")) return true
+    return method.parameterTypes.any { type ->
+        val typeName = type.name.lowercase()
+        typeName.contains("listener") &&
+            (typeName.contains("reward") || typeName.contains("ad"))
+    }
+}
+
+fun rememberAudienceNetworkRewardListeners(owner: Any?, args: List<Any?>?, method: Method) {
+    if (owner == null || args == null) return
+    args.forEach { arg ->
+        if (arg != null && isAudienceNetworkRewardListenerObject(arg)) {
+            audienceNetworkRewardAdListeners[owner] = arg
+            Logger.i(
+                TAG,
+                "Remembered Audience Network reward listener ${arg.javaClass.name} from ${method.declaringClass.name}.${method.name}"
+            )
+        } else {
+            findAudienceNetworkRewardListeners(arg).firstOrNull()?.let { listener ->
+                audienceNetworkRewardAdListeners[owner] = listener
+                Logger.i(
+                    TAG,
+                    "Remembered nested Audience Network reward listener ${listener.javaClass.name} from ${method.declaringClass.name}.${method.name}"
+                )
             }
         }
     }
 }
 
-internal fun isAudienceNetworkRewardRelevantClass(className: String): Boolean {
-    val lower = className.lowercase()
-    return lower.contains("com.facebook.ads") && 
-        (lower.contains("reward") || lower.contains("interstitial") || lower.contains("ad"))
-}
-
-internal fun isAudienceNetworkRewardShowMethod(clazz: Class<*>, method: Method): Boolean {
-    val name = method.name.lowercase()
-    return (name == "show" || name == "showad") && 
-        !Modifier.isStatic(method.modifiers) && 
-        method.parameterCount <= 1
-}
-
-internal fun isAudienceNetworkRewardLoadMethod(clazz: Class<*>, method: Method): Boolean {
-    return method.name.lowercase().contains("load") && 
-        !Modifier.isStatic(method.modifiers) && 
-        method.parameterCount <= 1
-}
-
-internal fun isAudienceNetworkRewardListenerRegistrationMethod(method: Method): Boolean {
-    val name = method.name.lowercase()
-    return (name.startsWith("set") || name.startsWith("add") || name == "withadlistener") && 
-        name.contains("listener") && 
-        method.parameterCount == 1
-}
-
-internal fun rememberAudienceNetworkRewardListeners(adObject: Any?, args: Array<Any?>?, method: Method) {
-    if (adObject == null || args.isNullOrEmpty()) return
-    val listener = args[0] ?: return
-    if (isAudienceNetworkRewardListenerObject(listener)) {
-        audienceNetworkRewardAdListeners[adObject] = listener
-        Logger.i(TAG, "Linked ad object ${adObject.javaClass.name} to listener ${listener.javaClass.name} via ${method.name}")
-    }
-}
-
-internal fun isAudienceNetworkRewardListenerObject(listener: Any?): Boolean {
-    if (listener == null) return false
-    val typeName = listener.javaClass.name.lowercase()
-    if (typeName.contains("listener") && (typeName.contains("reward") || typeName.contains("ad"))) {
+fun isAudienceNetworkRewardListenerObject(value: Any?): Boolean {
+    if (value == null) return false
+    val type = value.javaClass
+    val className = type.name.lowercase()
+    if (className.contains("listener") && (className.contains("reward") || className.contains("ad"))) {
         return true
     }
-    
-    val interfaces = audienceNetworkInterfacesFor(listener.javaClass)
-    return interfaces.any { iface ->
-        val ifaceName = iface.name.lowercase()
-        ifaceName.contains("listener") && (ifaceName.contains("reward") || ifaceName.contains("ad"))
+    if (audienceNetworkInterfacesFor(type).any { iface ->
+            val ifaceName = iface.name.lowercase()
+            ifaceName.contains("listener") && (ifaceName.contains("reward") || ifaceName.contains("ad"))
+        }) {
+        return true
+    }
+    return audienceNetworkRewardMethodsFor(type).any { method ->
+        method.name in AUDIENCE_NETWORK_REWARD_COMPLETION_METHOD_NAMES ||
+            method.name.contains("Reward", ignoreCase = true) ||
+            method.name.contains("InterstitialDismissed", ignoreCase = true)
     }
 }
 
-internal fun audienceNetworkInterfacesFor(type: Class<*>): List<Class<*>> {
-    val result = ArrayList<Class<*>>()
-    fun collect(clazz: Class<*>?) {
-        var current = clazz
-        while (current != null && current != Any::class.java) {
-            current.interfaces.forEach { iface ->
-                if (!result.contains(iface)) {
-                    result.add(iface)
-                    collect(iface)
-                }
-            }
-            current = current.superclass
+fun audienceNetworkInterfacesFor(type: Class<*>): List<Class<*>> {
+    val interfaces = LinkedHashSet<Class<*>>()
+    fun collect(current: Class<*>?) {
+        if (current == null || current == Any::class.java) return
+        current.interfaces.forEach { iface ->
+            if (interfaces.add(iface)) collect(iface)
         }
+        collect(current.superclass)
     }
     collect(type)
-    return result
+    return interfaces.toList()
 }
 
-internal fun completeAudienceNetworkRewardObject(adObject: Any, reason: String): Boolean {
-    val listener = audienceNetworkRewardAdListeners[adObject]
-    if (listener != null) {
-        val count = invokeAudienceNetworkRewardListenerCallbacks(adObject, listener, reason)
-        if (count > 0) {
-            Logger.i(TAG, "Successfully completed reward via registered listener ($reason)")
-            return true
-        }
+fun completeAudienceNetworkRewardObject(adObject: Any, source: String): Boolean {
+    if (!ENABLE_AUDIENCE_NETWORK_REWARD_FALLBACKS) return false
+
+    val listeners = LinkedHashSet<Any>()
+    synchronized(audienceNetworkRewardAdListeners) {
+        audienceNetworkRewardAdListeners[adObject]?.let { listeners.add(it) }
     }
-    
-    val foundCount = invokeAudienceNetworkRewardCompletionMethods(adObject)
-    if (foundCount > 0) {
-        Logger.i(TAG, "Completed reward via direct object methods ($reason)")
+    listeners.addAll(findAudienceNetworkRewardListeners(adObject))
+
+    var invoked = 0
+    listeners.forEach { listener ->
+        invoked += invokeAudienceNetworkRewardListenerCallbacks(listener, adObject, source)
+    }
+
+    if (invoked > 0) {
+        Logger.i(TAG, "Completed Audience Network reward callbacks invoked=$invoked listeners=${listeners.size} via $source")
+        completeRecentGameAdRequests(source)
         return true
     }
-    
+
+    Logger.w(TAG, "No Audience Network reward listener completed for ${adObject.javaClass.name} via $source")
     return false
 }
 
-internal fun findAudienceNetworkRewardListeners(adObject: Any?): List<Any> {
-    if (adObject == null) return emptyList()
-    val listeners = mutableListOf<Any>()
-    
-    val queue = ArrayDeque<Pair<Any, Int>>()
-    queue.add(adObject to 0)
-    val seen = Collections.newSetFromMap(IdentityHashMap<Any, Boolean>())
-    seen.add(adObject)
+fun findAudienceNetworkRewardListeners(root: Any?): List<Any> {
+    if (root == null) return emptyList()
 
-    while (queue.isNotEmpty()) {
+    val listeners = LinkedHashSet<Any>()
+    val seen = IdentityHashMap<Any, Boolean>()
+    val queue = java.util.ArrayDeque<Pair<Any, Int>>()
+    queue.add(root to 0)
+
+    var inspected = 0
+    while (!queue.isEmpty() && inspected < 96 && listeners.size < 8) {
         val (value, depth) = queue.removeFirst()
+        if (seen.put(value, true) != null) continue
+        inspected++
+
+        if (value !== root && isAudienceNetworkRewardListenerObject(value)) {
+            listeners.add(value)
+            continue
+        }
         if (depth >= 5 || !shouldQueueAudienceNetworkObject(value)) continue
 
         audienceNetworkFieldsFor(value.javaClass).forEach { field ->
-            val fieldValue = runCatching { field.get(value) }.getOrNull()
-            if (fieldValue != null && seen.add(fieldValue)) {
-                if (isAudienceNetworkRewardListenerObject(fieldValue)) {
-                    listeners.add(fieldValue)
-                } else {
+            val fieldValue = runCatching { field.get(value) }.getOrNull() ?: return@forEach
+            when (fieldValue) {
+                is Iterable<*> -> fieldValue.take(12).forEach { item ->
+                    if (item != null &&
+                        (isAudienceNetworkRewardListenerObject(item) || shouldQueueAudienceNetworkObject(item))
+                    ) {
+                        queue.add(item to depth + 1)
+                    }
+                }
+                is Array<*> -> fieldValue.take(12).forEach { item ->
+                    if (item != null &&
+                        (isAudienceNetworkRewardListenerObject(item) || shouldQueueAudienceNetworkObject(item))
+                    ) {
+                        queue.add(item to depth + 1)
+                    }
+                }
+                else -> if (isAudienceNetworkRewardListenerObject(fieldValue) ||
+                    shouldQueueAudienceNetworkObject(fieldValue)
+                ) {
                     queue.add(fieldValue to depth + 1)
                 }
             }
         }
     }
-    return listeners
+
+    return listeners.toList()
 }
 
-internal fun invokeAudienceNetworkRewardListenerCallbacks(adObject: Any, listener: Any, source: String): Int {
-    var count = 0
-    audienceNetworkRewardMethodsFor(listener.javaClass).forEach { method ->
-        if (AUDIENCE_NETWORK_REWARD_COMPLETION_METHOD_NAMES.contains(method.name)) {
-            val args = audienceNetworkCallbackArgs(method, adObject)
-            runCatching {
-                method.invoke(listener, *args.orEmpty())
-                Logger.i(TAG, "Invoked reward callback: ${method.name} on ${listener.javaClass.name} ($source)")
-                count++
+fun invokeAudienceNetworkRewardListenerCallbacks(listener: Any, adObject: Any, source: String): Int {
+    var invoked = 0
+    val methodGroups = listOf(
+        setOf("onAdLoaded", "onLoggingImpression", "onInterstitialDisplayed"),
+        setOf(
+            "onRewardedVideoCompleted",
+            "onRewardedAdCompleted",
+            "onRewardedInterstitialCompleted",
+            "onAdComplete",
+            "onAdCompleted"
+        ),
+        setOf("onRewardedVideoClosed", "onRewardedInterstitialClosed", "onAdClosed", "onInterstitialDismissed")
+    )
+
+    methodGroups.forEach { group ->
+        audienceNetworkRewardMethodsFor(listener.javaClass)
+            .filter { method -> method.name in group }
+            .forEach { method ->
+                val args = audienceNetworkCallbackArgs(method, adObject) ?: return@forEach
+                runCatching {
+                    method.invoke(listener, *args)
+                    invoked++
+                    Logger.i(
+                        TAG,
+                        "Invoked Audience Network callback ${listener.javaClass.name}.${method.name} via $source"
+                    )
+                }.onFailure {
+                    Logger.w(TAG, "Failed Audience Network callback ${listener.javaClass.name}.${method.name}", it)
+                }
             }
-        }
     }
-    return count
+
+    return invoked
 }
 
-internal fun audienceNetworkCallbackArgs(method: Method, adObject: Any): Array<Any?>? {
-    if (method.parameterCount == 0) return emptyArray()
+fun audienceNetworkCallbackArgs(method: Method, adObject: Any): Array<Any?>? {
     return when (method.parameterCount) {
+        0 -> emptyArray()
         1 -> {
             val paramType = method.parameterTypes[0]
             if (paramType.isAssignableFrom(adObject.javaClass)) arrayOf(adObject) else null
@@ -496,11 +351,10 @@ internal fun audienceNetworkCallbackArgs(method: Method, adObject: Any): Array<A
     }
 }
 
-internal fun audienceNetworkRewardMethodsFor(type: Class<*>): List<Method> {
-    if (!isNonStandardClass(type)) return emptyList()
+fun audienceNetworkRewardMethodsFor(type: Class<*>): List<Method> {
     val methods = LinkedHashMap<String, Method>()
     var current: Class<*>? = type
-    while (current != null && current != Any::class.java && current != Activity::class.java && isNonStandardClass(current)) {
+    while (current != null && current != Any::class.java && current != Activity::class.java) {
         (current.declaredMethods + current.methods).forEach { method ->
             if (!Modifier.isStatic(method.modifiers)) {
                 method.isAccessible = true
@@ -512,129 +366,16 @@ internal fun audienceNetworkRewardMethodsFor(type: Class<*>): List<Method> {
     return methods.values.toList()
 }
 
-internal fun scheduleAudienceNetworkRewardClose(activity: Activity, source: String) {
-    if (scheduledGameAdActivityCloses.containsKey(activity)) return
-    scheduledGameAdActivityCloses[activity] = System.currentTimeMillis()
-
-    Logger.i(TAG, "Scheduling automatic close for Audience Network activity ($source)")
-    
-    val handler = Handler(activity.mainLooper)
-    val checkAndClose = object : Runnable {
-        var attempts = 0
-        override fun run() {
-            if (activity.isFinishing || activity.isDestroyed) return
-            
-            if (clickLikelyAudienceNetworkCloseButton(activity, "auto-close-$attempts")) {
-                Logger.i(TAG, "Audience Network activity closed via button click")
-                return
-            }
-            
-            attempts++
-            if (attempts < 5) {
-                handler.postDelayed(this, 1000L)
-            } else {
-                Logger.i(TAG, "Fallback: Closing Audience Network activity directly")
-                activity.finish()
-            }
-        }
-    }
-    handler.postDelayed(checkAndClose, 1500L)
-}
-
-internal fun clickLikelyAudienceNetworkCloseButton(activity: Activity, source: String): Boolean {
-    val root = activity.window?.decorView ?: return false
-    val candidates = collectAudienceNetworkCloseCandidates(root)
-    
-    val best = candidates.maxByOrNull { audienceNetworkCloseCandidateScore(it, root) }
-    if (best != null && best.isShown && best.isClickable) {
-        Logger.i(TAG, "Clicking likely close button: ${describeAudienceNetworkView(best)} ($source)")
-        best.performClick()
-        return true
-    }
-    return false
-}
-
-internal fun collectAudienceNetworkCloseCandidates(root: View): List<View> {
-    val candidates = mutableListOf<View>()
-    val queue = ArrayDeque<View>()
-    queue.add(root)
-    
-    fun visit(view: View) {
-        if (audienceNetworkViewMarker(view).contains("exit-candidate")) {
-            candidates.add(view)
-        }
-        if (view is ViewGroup) {
-            for (i in 0 until view.childCount) {
-                visit(view.getChildAt(i))
-            }
-        }
-    }
-    visit(root)
-    return candidates
-}
-
-internal fun audienceNetworkCloseCandidateScore(view: View, root: View): Int {
-    var score = 0
-    val name = view.javaClass.name.lowercase()
-    if (name.contains("close")) score += 50
-    if (name.contains("skip")) score += 40
-    if (view is TextView && (view.text.contains("X") || view.text.isNullOrBlank())) score += 30
-    
-    // Closer to corners is better
-    val location = IntArray(2)
-    view.getLocationOnScreen(location)
-    if (location[0] < root.width * 0.2 || location[0] > root.width * 0.8) score += 20
-    if (location[1] < root.height * 0.2 || location[1] > root.height * 0.8) score += 20
-    
-    return score
-}
-
-internal fun forceAudienceNetworkRewardCompletion(activity: Activity, reason: String) {
-    Logger.i(TAG, "Forcing reward completion in activity: ${activity.javaClass.name} ($reason)")
-    
-    val queue = ArrayDeque<Pair<Any, Int>>()
-    queue.add(activity to 0)
-    val seen = Collections.newSetFromMap(IdentityHashMap<Any, Boolean>())
-    seen.add(activity)
-
-    while (queue.isNotEmpty()) {
-        val (value, depth) = queue.removeFirst()
-        if (depth >= 5 || !shouldTraverseAudienceNetworkObject(value, value === activity)) continue
-
-        audienceNetworkFieldsFor(value.javaClass).forEach { field ->
-            val fieldValue = runCatching { field.get(value) }.getOrNull()
-            if (fieldValue != null && seen.add(fieldValue)) {
-                if (isAudienceNetworkRewardRelevantClass(fieldValue.javaClass.name)) {
-                    completeAudienceNetworkRewardObject(fieldValue, "force-$reason")
-                } else if (shouldQueueAudienceNetworkObject(fieldValue)) {
-                    queue.add(fieldValue to depth + 1)
-                }
-            }
-        }
-    }
-}
-
-internal fun invokeAudienceNetworkRewardCompletionMethods(obj: Any): Int {
-    var count = 0
-    audienceNetworkRewardMethodsFor(obj.javaClass).forEach { method ->
-        if (AUDIENCE_NETWORK_REWARD_COMPLETION_METHOD_NAMES.contains(method.name)) {
-            runCatching {
-                method.invoke(obj)
-                Logger.i(TAG, "Invoked direct reward completion: ${method.name} on ${obj.javaClass.name}")
-                count++
-            }
-        }
-    }
-    return count
-}
-
-internal fun audienceNetworkFieldsFor(type: Class<*>): List<Field> {
-    if (!isNonStandardClass(type)) return emptyList()
+fun audienceNetworkFieldsFor(type: Class<*>): List<Field> {
     val fields = ArrayList<Field>()
     var current: Class<*>? = type
-    while (current != null && current != Any::class.java && current != Activity::class.java && isNonStandardClass(current) && fields.size < 48) {
+    while (current != null &&
+        current != Any::class.java &&
+        current != Activity::class.java &&
+        fields.size < 48
+    ) {
         current.declaredFields.forEach { field ->
-            if (!Modifier.isStatic(field.modifiers)) {
+            if (!Modifier.isStatic(field.modifiers) && fields.size < 48) {
                 field.isAccessible = true
                 fields.add(field)
             }
@@ -644,11 +385,13 @@ internal fun audienceNetworkFieldsFor(type: Class<*>): List<Field> {
     return fields
 }
 
-internal fun audienceNetworkMethodsFor(type: Class<*>): List<Method> {
-    if (!isNonStandardClass(type)) return emptyList()
+fun audienceNetworkMethodsFor(type: Class<*>): List<Method> {
     val methods = LinkedHashMap<String, Method>()
     var current: Class<*>? = type
-    while (current != null && current != Any::class.java && current != Activity::class.java && isNonStandardClass(current)) {
+    while (current != null &&
+        current != Any::class.java &&
+        current != Activity::class.java
+    ) {
         current.declaredMethods.forEach { method ->
             if (!Modifier.isStatic(method.modifiers)) {
                 method.isAccessible = true
@@ -660,22 +403,61 @@ internal fun audienceNetworkMethodsFor(type: Class<*>): List<Method> {
     return methods.values.toList()
 }
 
-internal fun isPotentialAudienceNetworkAppClass(className: String): Boolean {
-    val name = className.lowercase()
-    return name.startsWith("com.facebook.ads") || name.startsWith("x.") || name.startsWith("com.facebook.katana")
+fun shouldQueueAudienceNetworkObject(value: Any): Boolean {
+    val type = value.javaClass
+    if (type.isPrimitive ||
+        value is String ||
+        value is Number ||
+        value is Boolean ||
+        value is CharSequence
+    ) {
+        return false
+    }
+    return shouldTraverseAudienceNetworkObject(value, false)
 }
 
-internal fun shouldQueueAudienceNetworkObject(obj: Any): Boolean {
-    if (obj is View || obj is Activity || obj is android.content.Context) return true
-    val name = obj.javaClass.name
-    return isPotentialAudienceNetworkAppClass(name) && 
-        !name.startsWith("android.") && 
-        !name.startsWith("java.") && 
-        !name.startsWith("kotlin.")
+fun shouldTraverseAudienceNetworkObject(value: Any, isRootActivity: Boolean): Boolean {
+    if (isRootActivity) return true
+    val className = value.javaClass.name.lowercase()
+    return className.startsWith("com.facebook.ads.") ||
+        className.startsWith("com.facebook.audiencenetwork.") ||
+        className.contains("audiencenetwork") ||
+        className.contains("reward") ||
+        className.contains("interstitial") ||
+        className.contains("fullscreen") ||
+        className.contains("listener") ||
+        className.contains(".ads.")
 }
 
-internal fun shouldTraverseAudienceNetworkObject(obj: Any, isActivity: Boolean): Boolean {
-    if (isActivity) return true
-    val name = obj.javaClass.name
-    return isPotentialAudienceNetworkAppClass(name) && !name.contains("Litho") && !name.contains("View")
+fun findViewOnClickListener(view: View): Any? {
+    return runCatching {
+        val getListenerInfo = View::class.java.getDeclaredMethod("getListenerInfo").apply { isAccessible = true }
+        val listenerInfo = getListenerInfo.invoke(view)
+        val mOnClickListener = listenerInfo?.javaClass?.getDeclaredField("mOnClickListener")?.apply { isAccessible = true }
+        mOnClickListener?.get(listenerInfo)
+    }.getOrNull()
+}
+
+fun audienceNetworkParentPath(view: View): String {
+    val path = StringBuilder()
+    var current: Any? = view.parent
+    repeat(6) {
+        val p = current as? View ?: return@repeat
+        path.append(p.javaClass.simpleName).append("/")
+        current = p.parent
+    }
+    return path.toString()
+}
+
+fun isAudienceNetworkFinalExitListener(className: String): Boolean {
+    val normalized = className.lowercase()
+    return normalized in AUDIENCE_NETWORK_CLOSE_LISTENER_CLASS_NAMES ||
+        (normalized.startsWith("com.facebook.ads.") &&
+            (normalized.contains("close") || normalized.contains("exit") || normalized.contains("dismiss")))
+}
+
+fun isAudienceNetworkClosePromptListener(className: String): Boolean {
+    val normalized = className.lowercase()
+    return normalized.contains("reward") &&
+        (normalized.contains("close") || normalized.contains("exit") || normalized.contains("prompt"))
 }

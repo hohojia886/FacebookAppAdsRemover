@@ -16,8 +16,13 @@ object Logger {
         if (BuildConfig.DEBUG) AndroidLog.e(tag, msg, throwable) else 0
 
     fun missing(tag: String, hookName: String): Int =
-        if (BuildConfig.DEBUG) AndroidLog.w(tag, "Hook target not found: $hookName") else 0
+        AndroidLog.w(tag, "Hook target not found: $hookName")
 
-    fun resolutionFailure(tag: String, msg: String, throwable: Throwable): Int =
-        if (BuildConfig.DEBUG) AndroidLog.e(tag, msg, throwable) else 0
+    fun resolutionFailure(tag: String, msg: String, throwable: Throwable): Int {
+        return if (BuildConfig.DEBUG || throwable.message?.contains("Unable to resolve") == true) {
+            AndroidLog.e(tag, msg, throwable)
+        } else {
+            0
+        }
+    }
 }
