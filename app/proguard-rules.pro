@@ -1,21 +1,19 @@
-# Add project specific ProGuard rules here.
-# You can control the set of applied configuration files using the
-# proguardFiles setting in build.gradle.
-#
-# For more details, see
-#   http://developer.android.com/guide/developing/tools/proguard.html
+# [2026-08-17 00:48] Security Hardening: Keep rules for Xposed and DexKit
 
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
+# Keep the Xposed module entry point
+-keep class tn.loukious.facebookappadsremover.Module { *; }
 
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
+# Keep LibXposed API classes
+-keep class io.github.libxposed.api.** { *; }
 
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
+# Keep DexKit classes and JNI
+-keep class org.luckypray.dexkit.** { *; }
+-keepclassmembers class org.luckypray.dexkit.** {
+    native <methods>;
+}
+
+# Keep common reflection targets if necessary
+-keepattributes Signature,EnclosingMethod,InnerClasses,AnnotationDefault,*Annotation*,Exceptions
+
+# Keep everything in our package if we want to be safe with reflection
+# -keep class tn.loukious.facebookappadsremover.** { *; }

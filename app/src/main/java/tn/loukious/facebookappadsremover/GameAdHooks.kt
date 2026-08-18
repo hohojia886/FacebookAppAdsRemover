@@ -263,9 +263,14 @@ fun shouldConvertGameAdRejectToSuccess(promiseId: String, reason: String): Boole
     val snapshot = gameAdPromiseSnapshots[promiseId]
     if (shouldAutofixGameAdMessage(snapshot?.messageType)) return true
 
+    /*
+    // [2026-08-17 01:19] Original implementation:
     val normalized = reason.lowercase()
     if (!isRecentGameAdActivityClose()) return false
     return normalized.contains("banner")
+    */
+    if (!isRecentGameAdActivityClose()) return false
+    return reason.contains("banner", ignoreCase = true)
 }
 
 fun shouldAutofixGameAdMessage(messageType: String?): Boolean {
@@ -305,6 +310,8 @@ fun shouldMakeGameAdUnavailable(payload: Any?, messageType: String?): Boolean {
     val knownType = adInstanceId?.let { gameAdInstanceTypes[it] }
     if (knownType in GAME_AD_UNAVAILABLE_MESSAGE_TYPES) return true
 
+    /*
+    // [2026-08-17 01:20] Original implementation:
     val placementText = listOf(
         content?.optString("placementID").orEmpty(),
         content?.optString("adType").orEmpty(),
@@ -314,6 +321,16 @@ fun shouldMakeGameAdUnavailable(payload: Any?, messageType: String?): Boolean {
     if (placementText.contains("reward")) return true
 
     return payload?.toString()?.lowercase()?.contains("rewarded") == true
+    */
+    val placementText = listOf(
+        content?.optString("placementID").orEmpty(),
+        content?.optString("adType").orEmpty(),
+        content?.optString("type").orEmpty(),
+        content?.optString("format").orEmpty()
+    ).joinToString(" ")
+    if (placementText.contains("reward", ignoreCase = true)) return true
+
+    return payload?.toString()?.contains("rewarded", ignoreCase = true) == true
 }
 
 fun isRecentUnavailableGameAd(): Boolean {
@@ -327,6 +344,8 @@ fun isRecentGameAdActivityClose(): Boolean {
 }
 
 fun gameAdPromiseTypeFromReason(reason: String): String? {
+    /*
+    // [2026-08-17 01:21] Original implementation:
     val normalized = reason.lowercase()
     return when {
         normalized.contains("reward") && normalized.contains("interstitial") -> "getrewardedinterstitialasync"
@@ -335,6 +354,16 @@ fun gameAdPromiseTypeFromReason(reason: String): String? {
         normalized.contains("banner") -> "loadbanneradasync"
         normalized.contains("show") || normalized.contains("watch") || normalized.contains("complete") -> "showadasync"
         normalized.contains("load") -> "loadadasync"
+        else -> null
+    }
+    */
+    return when {
+        reason.contains("reward", ignoreCase = true) && reason.contains("interstitial", ignoreCase = true) -> "getrewardedinterstitialasync"
+        reason.contains("reward", ignoreCase = true) -> "getrewardedvideoasync"
+        reason.contains("interstitial", ignoreCase = true) -> "getinterstitialadasync"
+        reason.contains("banner", ignoreCase = true) -> "loadbanneradasync"
+        reason.contains("show", ignoreCase = true) || reason.contains("watch", ignoreCase = true) || reason.contains("complete", ignoreCase = true) -> "showadasync"
+        reason.contains("load", ignoreCase = true) -> "loadadasync"
         else -> null
     }
 }
@@ -1037,7 +1066,11 @@ fun logGameAdDiagnostic(tag: String, msg: String) {
     val count = gameAdDiagnosticLogCount.incrementAndGet()
     if (count > GAME_AD_DIAG_LOG_LIMIT) return
 
+    /*
+    // [2026-08-17 01:06] Original:
     Logger.i(TAG, "GameAdDiag[$tag] ${msg.take(GAME_AD_DIAG_TEXT_LIMIT)}")
+    */
+    Logger.i(TAG) { "GameAdDiag[$tag] ${msg.take(GAME_AD_DIAG_TEXT_LIMIT)}" }
 }
 
 fun methodSignature(method: Method): String {
@@ -1049,6 +1082,8 @@ fun formatDiagArgs(args: List<Any?>?): String {
     return args.joinToString(", ", prefix = "[", postfix = "]") { formatDiagValue(it) }
 }
 
+/*
+// [2026-08-17 00:46] Original implementation:
 fun formatDiagValue(value: Any?): String {
     if (value == null) return "null"
     return when (value) {
@@ -1069,6 +1104,83 @@ fun formatDiagBundle(bundle: Bundle?): String {
     return keys.joinToString(", ", prefix = "{", postfix = "}") { key ->
         "$key=${formatDiagValue(runCatching { bundle.get(key) }.getOrNull())}"
     }
+}
+*/
+
+fun formatDiagValue(value: Any?): String {
+    if (value == null) return "null"
+    return when (value) {
+        is String -> {
+            val truncated = if (value.length > 128) value.take(121) + " (trunc...)" else value
+            "\"$truncated\""
+        }
+        is Number, is Boolean -> value.toString()
+        is Intent -> "Intent(action=${value.action} component=${value.component} extras=${formatDiagBundle(value.extras)})"
+        is Bundle -> "Bundle${formatDiagBundle(value)}"
+        is Message -> "Message(what=${value.what} arg1=${value.arg1} arg2=${value.arg2} obj=${formatDiagValue(value.obj)} data=${formatDiagBundle(value.peekData())})"
+        is Messenger -> "Messenger(binder=${value.binder})"
+        is JSONObject -> {
+            val masked = maskSensitiveJson(value)
+            val raw = masked.toString()
+            val truncated = if (raw.length > 1024) raw.take(1017) + " (trunc...)" else raw
+            "JSONObject($truncated)"
+        }
+        else -> "${value.javaClass.simpleName}@${System.identityHashCode(value)}"
+    }
+}
+
+fun formatDiagBundle(bundle: Bundle?): String {
+    if (bundle == null) return "null"
+    val keys = runCatching { bundle.keySet() }.getOrNull() ?: return "{<locked>}"
+    return keys.joinToString(", ", prefix = "{", postfix = "}") { key ->
+        val value = runCatching { bundle.get(key) }.getOrNull()
+        val formatted = if (isSensitiveKey(key)) {
+            "[MASKED]"
+        } else {
+            formatDiagValue(value)
+        }
+        "$key=$formatted"
+    }
+}
+
+private fun isSensitiveKey(key: String): Boolean {
+    /*
+    // [2026-08-17 01:21] Original implementation:
+    val normalized = key.lowercase()
+    return normalized.contains("token") || 
+           normalized.contains("session") || 
+           normalized.contains("password") || 
+           normalized.contains("userid") || 
+           normalized.contains("email") ||
+           normalized.contains("secret") ||
+           normalized.contains("credential")
+    */
+    return key.contains("token", ignoreCase = true) || 
+           key.contains("session", ignoreCase = true) || 
+           key.contains("password", ignoreCase = true) || 
+           key.contains("userid", ignoreCase = true) || 
+           key.contains("email", ignoreCase = true) ||
+           key.contains("secret", ignoreCase = true) ||
+           key.contains("credential", ignoreCase = true)
+}
+
+private fun maskSensitiveJson(json: JSONObject): JSONObject {
+    val result = JSONObject()
+    val keys = json.keys()
+    while (keys.hasNext()) {
+        val key = keys.next()
+        if (isSensitiveKey(key)) {
+            result.put(key, "[MASKED]")
+        } else {
+            val value = json.opt(key)
+            if (value is JSONObject) {
+                result.put(key, maskSensitiveJson(value))
+            } else {
+                result.put(key, value)
+            }
+        }
+    }
+    return result
 }
 
 fun formatDiagThrowable(t: Throwable?): String {

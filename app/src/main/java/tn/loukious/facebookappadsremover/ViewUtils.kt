@@ -28,6 +28,8 @@ fun scheduleFeedRowSweep(view: View?, reason: String) {
     }
 }
 
+/*
+// [2026-08-17 08:24] Project E: Original recursive implementation:
 fun sweepGameAdSurface(view: View?, reason: String): Boolean {
     if (view == null) return false
 
@@ -48,6 +50,43 @@ fun sweepGameAdSurface(view: View?, reason: String): Boolean {
     val group = view as? ViewGroup ?: return hidden
     for (index in 0 until group.childCount) {
         hidden = sweepGameAdSurface(group.getChildAt(index), reason) || hidden
+    }
+    return hidden
+}
+*/
+
+fun sweepGameAdSurface(root: View?, reason: String): Boolean {
+    if (root == null) return false
+
+    val queue = java.util.ArrayDeque<View>()
+    queue.add(root)
+    var hidden = false
+
+    while (queue.isNotEmpty()) {
+        val view = queue.removeFirst()
+
+        if (view is WebView) {
+            injectGameAdHidingScript(view)
+        }
+        if (isLikelyExplicitFeedAdCardContainer(view)) {
+            hidden = hideLikelyExplicitFeedAdCardContainer(view, reason) || hidden
+        }
+        if (isPotentialNativeGameAdView(view) || isPotentialExplicitFeedAdMarkerView(view) || (ENABLE_FEED_UI_MARKER_FALLBACKS && (isPotentialFeedAdMarkerView(view) || (view is TextView && isAnyAdMarkerText(view.text))))) {
+            hidden = hideLikelyAdContainer(view, reason) || hidden
+        }
+        if (ENABLE_FEED_UI_MARKER_FALLBACKS && isPotentialFeedReelCtaAdMarkerView(view)) {
+            hidden = hideLikelyFeedReelCtaAdContainer(view, reason) || hidden
+        }
+
+        val group = view as? ViewGroup
+        if (group != null) {
+            for (index in 0 until group.childCount) {
+                val child = group.getChildAt(index)
+                if (child != null) {
+                    queue.addLast(child)
+                }
+            }
+        }
     }
     return hidden
 }
@@ -330,11 +369,18 @@ fun collectExplicitFeedAdCardSignals(root: View): ExplicitFeedAdCardSignals {
         visited++
 
         for (marker in collectViewMarkerTexts(view)) {
+            /*
+            // [2026-08-17 01:13] Original:
             val normalized = marker.lowercase()
             if (!hasHideAd && normalized.contains("hide ad")) hasHideAd = true
             if (!hasAdLabel && isExplicitFeedAdMarkerText(normalized)) hasAdLabel = true
             if (!hasSharedLink && normalized.contains("shared link:")) hasSharedLink = true
             if (!hasStrongCta && isExplicitFeedAdCtaText(normalized)) hasStrongCta = true
+            */
+            if (!hasHideAd && marker.contains("hide ad", ignoreCase = true)) hasHideAd = true
+            if (!hasAdLabel && isExplicitFeedAdMarkerText(marker)) hasAdLabel = true
+            if (!hasSharedLink && marker.contains("shared link:", ignoreCase = true)) hasSharedLink = true
+            if (!hasStrongCta && isExplicitFeedAdCtaText(marker)) hasStrongCta = true
         }
 
         val group = view as? ViewGroup ?: continue
@@ -400,6 +446,8 @@ fun collectFeedReelCtaAdSignals(root: View): FeedReelCtaAdSignals {
         val view = queue.removeFirst()
         visited++
 
+        /*
+        // [2026-08-17 01:16] Original implementation:
         val className = view.javaClass.name.lowercase()
         val contentDescription = view.contentDescription?.toString().orEmpty().lowercase()
         val text = (view as? TextView)?.text?.toString().orEmpty().lowercase()
@@ -424,6 +472,25 @@ fun collectFeedReelCtaAdSignals(root: View): FeedReelCtaAdSignals {
                 )
         ) {
             hasReelSurface = true
+        }
+        */
+        val className = view.javaClass.name
+        val contentDescription = view.contentDescription?.toString().orEmpty()
+        val text = (view as? TextView)?.text?.toString().orEmpty()
+
+        if (!hasSharedLink && (className.contains("shared link:", ignoreCase = true) || contentDescription.contains("shared link:", ignoreCase = true) || text.contains("shared link:", ignoreCase = true))) hasSharedLink = true
+        if (!hasSendMessageCta && (className.contains("send message", ignoreCase = true) || contentDescription.contains("send message", ignoreCase = true) || text.contains("send message", ignoreCase = true))) hasSendMessageCta = true
+        
+        if (!hasLeadGenPrompt) {
+            val isLeadGen = className.contains("your business", ignoreCase = true) || contentDescription.contains("your business", ignoreCase = true) || text.contains("your business", ignoreCase = true) ||
+                            className.contains("your ad", ignoreCase = true) || contentDescription.contains("your ad", ignoreCase = true) || text.contains("your ad", ignoreCase = true)
+            if (isLeadGen) hasLeadGenPrompt = true
+        }
+
+        if (!hasReelSurface) {
+            val isReel = className.contains("reel", ignoreCase = true) || contentDescription.contains("reel", ignoreCase = true) || text.contains("reel", ignoreCase = true) ||
+                         className.contains("surfaceview", ignoreCase = true) || className.contains("textureview", ignoreCase = true) || className.contains("videoview", ignoreCase = true)
+            if (isReel) hasReelSurface = true
         }
 
         val group = view as? ViewGroup ?: continue
@@ -489,34 +556,61 @@ fun isAnyAdMarkerText(value: CharSequence?): Boolean {
 
 fun isGameAdMarkerText(value: CharSequence?): Boolean {
     if (value.isNullOrBlank()) return false
+    /*
+    // [2026-08-17 01:14] Original implementation:
     val normalized = value.toString().lowercase()
     return normalized.contains("ads served by meta") ||
         normalized.contains("ad choices") ||
         normalized.contains("adchoices")
+    */
+    val str = value.toString()
+    return str.contains("ads served by meta", ignoreCase = true) ||
+        str.contains("ad choices", ignoreCase = true) ||
+        str.contains("adchoices", ignoreCase = true)
 }
 
 fun isFeedAdMarkerText(value: CharSequence?): Boolean {
     if (value.isNullOrBlank()) return false
+    /*
+    // [2026-08-17 01:15] Original implementation:
     val normalized = value.toString().lowercase()
     return FEED_SURFACE_AD_MARKER_TOKENS.any { token -> normalized.contains(token) }
+    */
+    val str = value.toString()
+    return FEED_SURFACE_AD_MARKER_TOKENS.any { token -> str.contains(token, ignoreCase = true) }
 }
 
 fun isExplicitFeedAdMarkerText(value: CharSequence?): Boolean {
     if (value.isNullOrBlank()) return false
+    /*
+    // [2026-08-17 01:15] Original implementation:
     val normalized = value.toString().lowercase()
     return EXPLICIT_FEED_CARD_AD_MARKER_TOKENS.any { token -> normalized.contains(token) }
+    */
+    val str = value.toString()
+    return EXPLICIT_FEED_CARD_AD_MARKER_TOKENS.any { token -> str.contains(token, ignoreCase = true) }
 }
 
 fun isExplicitFeedAdCtaText(value: CharSequence?): Boolean {
     if (value.isNullOrBlank()) return false
+    /*
+    // [2026-08-17 01:15] Original implementation:
     val normalized = value.toString().lowercase()
     return EXPLICIT_FEED_AD_CTA_TOKENS.any { token -> normalized.contains(token) }
+    */
+    val str = value.toString()
+    return EXPLICIT_FEED_AD_CTA_TOKENS.any { token -> str.contains(token, ignoreCase = true) }
 }
 
 fun isFeedReelCtaAdMarkerText(value: CharSequence?): Boolean {
     if (value.isNullOrBlank()) return false
+    /*
+    // [2026-08-17 01:15] Original implementation:
     val normalized = value.toString().lowercase()
     return FEED_REEL_CTA_AD_MARKER_TOKENS.any { token -> normalized.contains(token) }
+    */
+    val str = value.toString()
+    return FEED_REEL_CTA_AD_MARKER_TOKENS.any { token -> str.contains(token, ignoreCase = true) }
 }
 
 fun isLikelyBannerSized(view: View, root: View?): Boolean {

@@ -69,3 +69,14 @@ fun invokeMethodByName(target: Any?, methodName: String, vararg args: Any?): Any
     method.isAccessible = true
     return runCatching { method.invoke(target, *args) }.getOrNull()
 }
+
+// [2026-08-17 20:27] Project C: Re-implementing Type-check Short-circuiting utility
+internal fun isNonTargetClass(clazz: Class<*>): Boolean {
+    val name = clazz.name
+    return name.startsWith("java.") || 
+           name.startsWith("android.") || 
+           name.startsWith("androidx.") || 
+           name.startsWith("kotlin.") || 
+           name.startsWith("kotlinx.") ||
+           (name.startsWith("com.google.") && !name.contains("ImmutableList"))
+}

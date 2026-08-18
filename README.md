@@ -4,6 +4,19 @@ An LSPosed/Xposed module for `com.facebook.katana` that removes ads using struct
 
 Current target: Facebook `571.0.0.44.73` (`473224484`), module `1.6`.
 
+
+## Updates
+- LibXposed API 102 Migration: Upgraded the core framework from the obsolete API 93 to the modern LSPosed API 102, adopting the Interceptor pattern for more reliable hook management.
+- Multi-file Modular Refactoring: Decoupled the original 6500+ line   Patches.kt into 13 specialized functional modules (e.g., FeedHooks, StoryHooks, GameAdHooks) to improve code readability and maintainability.
+- Security Hardening: Hardened the   AndroidManifest.xml by setting allowBackup="false" and removing redundant backup configurations to prevent unauthorized data extraction via ADB.
+- Privacy-Aware Logging: Enhanced diagnostic logging to automatically mask sensitive information (such as tokens, session IDs, and passwords) and truncate strings exceeding 128 characters.
+- Performance Project A (Lazy Logging): Implemented lambda-based inline logging functions to eliminate string interpolation and memory allocation overhead when debug logging is disabled.
+- Performance Project B (String Optimization): Replaced resource-heavy .lowercase().contains() calls with .contains(..., ignoreCase = true) to reduce temporary object allocations during high-frequency ad signal scanning.
+- Performance Project C (Type Short-Circuiting): Introduced a "fast-fail" mechanism that skips recursive scanning for standard Java, Android, and Kotlin system classes, significantly reducing CPU usage during feed scrolling.
+- R8 & ProGuard Integration: Enabled code shrinking and obfuscation for Release builds while maintaining stability through specialized keep-rules for the Xposed entry point and DexKit JNI interfaces.
+- Stability & Conflict Resolution: Resolved naming conflicts by renaming the global Log object to Logger and optimized member visibility using the internal keyword to support the new multi-file structure.
+
+
 ## Scope
 
 - News Feed sponsored units

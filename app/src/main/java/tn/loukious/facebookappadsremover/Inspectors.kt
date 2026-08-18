@@ -31,9 +31,17 @@ class AdStoryInspector(
         if (isAdKind(value)) return true
 
         val type = value.javaClass
+        /*
+        // [2026-08-17 20:28] Original implementation:
         if (type.isPrimitive || value is String || value is Number || value is Boolean || value is CharSequence) {
             return false
         }
+        */
+        // Project C: Short-circuit system classes that aren't the adKindEnumClass
+        if (isNonTargetClass(type) && type != adKindEnumClass) {
+            return false
+        }
+
         if (seen.put(value, true) != null) return false
 
         if (value is Iterable<*>) {
@@ -57,14 +65,9 @@ class AdStoryInspector(
             }
         }
 
-        for (method in enumMethodsFor(type)) {
-            val marker = runCatching { method.invoke(value) }.getOrNull()
-            if (isAdKind(marker)) return true
-        }
-
-        for (field in fieldsFor(type)) {
-            val fieldValue = runCatching { field.get(value) }.getOrNull()
-            if (containsAdKind(fieldValue, depth + 1, seen)) return true
+        // Project C: Short-circuit system classes
+        if (isNonTargetClass(type)) {
+            return false
         }
 
         return false
@@ -88,10 +91,17 @@ class AdStoryInspector(
             return isReelsAdSignalText(value.toString())
         }
 
+        /*
+        // [2026-08-17 20:29] Original implementation:
         if (type.isPrimitive || value is Number || value is Boolean) {
             return false
         }
-
+        */
+        // Project C: Short-circuit system classes
+        if (isNonTargetClass(type)) {
+            return false
+        }
+        
         if (seen.put(value, true) != null) return false
 
         if (value is Iterable<*>) {
@@ -201,8 +211,7 @@ class AdStoryInspector(
 
     private fun isReelsAdSignalText(value: String?): Boolean {
         if (value.isNullOrBlank()) return false
-        val normalized = value.lowercase()
-        return REELS_AD_SIGNAL_TOKENS.any { token -> normalized.contains(token) }
+        return REELS_AD_SIGNAL_TOKENS.any { token -> value.contains(token, ignoreCase = true) }
     }
 }
 
@@ -542,7 +551,14 @@ class FeedItemInspector(
             return isAdSignalText(value.toString())
         }
 
+        /*
+        // [2026-08-17 20:30] Original implementation:
         if (type.isPrimitive || value is Number || value is Boolean) {
+            return false
+        }
+        */
+        // Project C: Short-circuit system classes
+        if (isNonTargetClass(type)) {
             return false
         }
 
@@ -596,8 +612,7 @@ class FeedItemInspector(
 
     private fun isAdSignalText(value: String?): Boolean {
         if (value.isNullOrBlank()) return false
-        val normalized = value.lowercase()
-        return FEED_AD_SIGNAL_TOKENS.any { token -> normalized.contains(token) }
+        return FEED_AD_SIGNAL_TOKENS.any { token -> value.contains(token, ignoreCase = true) }
     }
 
     private fun allInstanceMethods(type: Class<*>): List<Method> {

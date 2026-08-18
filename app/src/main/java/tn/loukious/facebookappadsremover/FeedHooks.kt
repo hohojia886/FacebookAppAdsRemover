@@ -185,7 +185,11 @@ fun hookFeedCsrFilterInput(
                 if (rebuilt != null) {
                     val newArgs = chain.args.toTypedArray()
                     newArgs[hook.listArgIndex] = rebuilt
+                    /*
+                    // [2026-08-17 01:04] Original:
                     Logger.i(TAG, "Removed $removed sponsored feed item(s) before ${hook.method.declaringClass.name}.${hook.method.name}")
+                    */
+                    Logger.i(TAG) { "Removed $removed sponsored feed item(s) before ${hook.method.declaringClass.name}.${hook.method.name}" }
                     val res = chain.proceed(newArgs)
                     val finalResult = handleFilterOutput(res, filterName, feedItemInspector)
                     return@intercept finalResult ?: res
@@ -216,7 +220,11 @@ fun handleFilterOutput(result: Any?, filterName: String, feedItemInspector: Feed
         if (removed > 0) {
             val rebuiltResult = result?.let { rebuildFeedResult(it, keptItems) }
             if (rebuiltResult != null) {
+                /*
+                // [2026-08-17 01:05] Original:
                 Logger.i(TAG, "Removed $removed sponsored feed item(s) from result of $filterName")
+                */
+                Logger.i(TAG) { "Removed $removed sponsored feed item(s) from result of $filterName" }
                 return rebuiltResult
             }
         }

@@ -137,6 +137,8 @@ fun tryHookAudienceNetworkRewardClass(module: XposedModule, clazz: Class<*>) {
 }
 
 fun isAudienceNetworkRewardRelevantClass(className: String): Boolean {
+    /*
+    // [2026-08-17 01:23] Original implementation:
     val normalized = className.lowercase()
     return (normalized.startsWith("com.facebook.ads.") ||
         normalized.startsWith("com.facebook.audiencenetwork.") ||
@@ -147,11 +149,31 @@ fun isAudienceNetworkRewardRelevantClass(className: String): Boolean {
                 normalized.contains("adconfig") ||
                 normalized.endsWith(".ad")
             )
+    */
+    return (className.startsWith("com.facebook.ads.", ignoreCase = true) ||
+        className.startsWith("com.facebook.audiencenetwork.", ignoreCase = true) ||
+        className.contains("audiencenetwork", ignoreCase = true)) &&
+        (
+            className.contains("reward", ignoreCase = true) ||
+                className.contains("adlistener", ignoreCase = true) ||
+                className.contains("adconfig", ignoreCase = true) ||
+                className.endsWith(".ad", ignoreCase = true)
+            )
 }
 
 fun isAudienceNetworkRewardShowMethod(clazz: Class<*>, method: Method): Boolean {
+    /*
+    // [2026-08-17 01:24] Original implementation:
     val className = clazz.name.lowercase()
     return className.contains("reward") &&
+        method.name == "show" &&
+        !Modifier.isStatic(method.modifiers) &&
+        method.parameterCount <= 1 &&
+        (method.returnType == Void.TYPE ||
+            method.returnType == Boolean::class.javaPrimitiveType ||
+            method.returnType == Boolean::class.java)
+    */
+    return clazz.name.contains("reward", ignoreCase = true) &&
         method.name == "show" &&
         !Modifier.isStatic(method.modifiers) &&
         method.parameterCount <= 1 &&
@@ -161,20 +183,36 @@ fun isAudienceNetworkRewardShowMethod(clazz: Class<*>, method: Method): Boolean 
 }
 
 fun isAudienceNetworkRewardLoadMethod(clazz: Class<*>, method: Method): Boolean {
+    /*
+    // [2026-08-17 01:24] Original implementation:
     return clazz.name.lowercase().contains("reward") &&
         method.name.lowercase().contains("load") &&
+        !Modifier.isStatic(method.modifiers) &&
+        method.parameterCount >= 1
+    */
+    return clazz.name.contains("reward", ignoreCase = true) &&
+        method.name.contains("load", ignoreCase = true) &&
         !Modifier.isStatic(method.modifiers) &&
         method.parameterCount >= 1
 }
 
 fun isAudienceNetworkRewardListenerRegistrationMethod(method: Method): Boolean {
     if (Modifier.isStatic(method.modifiers) || method.parameterCount == 0) return false
+    /*
+    // [2026-08-17 01:25] Original implementation:
     val name = method.name.lowercase()
     if (name.contains("listener")) return true
     return method.parameterTypes.any { type ->
         val typeName = type.name.lowercase()
         typeName.contains("listener") &&
             (typeName.contains("reward") || typeName.contains("ad"))
+    }
+    */
+    if (method.name.contains("listener", ignoreCase = true)) return true
+    return method.parameterTypes.any { type ->
+        val typeName = type.name
+        typeName.contains("listener", ignoreCase = true) &&
+            (typeName.contains("reward", ignoreCase = true) || typeName.contains("ad", ignoreCase = true))
     }
 }
 
@@ -202,6 +240,8 @@ fun rememberAudienceNetworkRewardListeners(owner: Any?, args: List<Any?>?, metho
 fun isAudienceNetworkRewardListenerObject(value: Any?): Boolean {
     if (value == null) return false
     val type = value.javaClass
+    /*
+    // [2026-08-17 01:26] Original implementation:
     val className = type.name.lowercase()
     if (className.contains("listener") && (className.contains("reward") || className.contains("ad"))) {
         return true
@@ -209,6 +249,17 @@ fun isAudienceNetworkRewardListenerObject(value: Any?): Boolean {
     if (audienceNetworkInterfacesFor(type).any { iface ->
             val ifaceName = iface.name.lowercase()
             ifaceName.contains("listener") && (ifaceName.contains("reward") || ifaceName.contains("ad"))
+        }) {
+        return true
+    }
+    */
+    val className = type.name
+    if (className.contains("listener", ignoreCase = true) && (className.contains("reward", ignoreCase = true) || className.contains("ad", ignoreCase = true))) {
+        return true
+    }
+    if (audienceNetworkInterfacesFor(type).any { iface ->
+            val ifaceName = iface.name
+            ifaceName.contains("listener", ignoreCase = true) && (ifaceName.contains("reward", ignoreCase = true) || ifaceName.contains("ad", ignoreCase = true))
         }) {
         return true
     }
@@ -418,6 +469,8 @@ fun shouldQueueAudienceNetworkObject(value: Any): Boolean {
 
 fun shouldTraverseAudienceNetworkObject(value: Any, isRootActivity: Boolean): Boolean {
     if (isRootActivity) return true
+    /*
+    // [2026-08-17 01:27] Original implementation:
     val className = value.javaClass.name.lowercase()
     return className.startsWith("com.facebook.ads.") ||
         className.startsWith("com.facebook.audiencenetwork.") ||
@@ -427,6 +480,16 @@ fun shouldTraverseAudienceNetworkObject(value: Any, isRootActivity: Boolean): Bo
         className.contains("fullscreen") ||
         className.contains("listener") ||
         className.contains(".ads.")
+    */
+    val className = value.javaClass.name
+    return className.startsWith("com.facebook.ads.", ignoreCase = true) ||
+        className.startsWith("com.facebook.audiencenetwork.", ignoreCase = true) ||
+        className.contains("audiencenetwork", ignoreCase = true) ||
+        className.contains("reward", ignoreCase = true) ||
+        className.contains("interstitial", ignoreCase = true) ||
+        className.contains("fullscreen", ignoreCase = true) ||
+        className.contains("listener", ignoreCase = true) ||
+        className.contains(".ads.", ignoreCase = true)
 }
 
 fun findViewOnClickListener(view: View): Any? {
@@ -450,14 +513,25 @@ fun audienceNetworkParentPath(view: View): String {
 }
 
 fun isAudienceNetworkFinalExitListener(className: String): Boolean {
+    /*
+    // [2026-08-17 01:28] Original implementation:
     val normalized = className.lowercase()
     return normalized in AUDIENCE_NETWORK_CLOSE_LISTENER_CLASS_NAMES ||
         (normalized.startsWith("com.facebook.ads.") &&
             (normalized.contains("close") || normalized.contains("exit") || normalized.contains("dismiss")))
+    */
+    return className in AUDIENCE_NETWORK_CLOSE_LISTENER_CLASS_NAMES ||
+        (className.startsWith("com.facebook.ads.", ignoreCase = true) &&
+            (className.contains("close", ignoreCase = true) || className.contains("exit", ignoreCase = true) || className.contains("dismiss", ignoreCase = true)))
 }
 
 fun isAudienceNetworkClosePromptListener(className: String): Boolean {
+    /*
+    // [2026-08-17 01:28] Original implementation:
     val normalized = className.lowercase()
     return normalized.contains("reward") &&
         (normalized.contains("close") || normalized.contains("exit") || normalized.contains("prompt"))
+    */
+    return className.contains("reward", ignoreCase = true) &&
+        (className.contains("close", ignoreCase = true) || className.contains("exit", ignoreCase = true) || className.contains("prompt", ignoreCase = true))
 }

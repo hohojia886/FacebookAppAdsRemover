@@ -19,7 +19,12 @@ android {
 
     buildTypes {
         release {
+            /*
+            // [2026-08-17 00:47] Original:
             isMinifyEnabled = false
+            */
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
