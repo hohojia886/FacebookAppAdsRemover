@@ -1900,11 +1900,16 @@ fun discoverFeedComponentGuardCandidates(bridge: DexKitBridge, classLoader: Clas
 
 // The full DexKit scan takes seconds, but the cached initial News Feed renders
 // within the first seconds after a cold start — before the scan finishes. The
-// discovered guard pair is therefore persisted (keyed by the host app version)
-// so later launches can register and hook the same classes within ~100ms of
-// Application.attach. A Facebook update changes the obfuscated names, which
-// invalidates the cache automatically via the version key.
+// discovered guard pair is therefore persisted (keyed by the host app version
+// AND the module version) so later launches can register and hook the same
+// classes within ~100ms of Application.attach. A Facebook update changes the
+// obfuscated names, and a module update may change discovery semantics; either
+// invalidates the cache via the version keys.
 private const val FEED_GUARD_CACHE_FILE = "fbar_feed_guard_cache.properties"
+
+private fun feedGuardCacheModuleKey(): String {
+    return "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})"
+}
 
 private fun registerCachedGuardClasses(
     classLoader: ClassLoader,
@@ -1948,6 +1953,10 @@ fun loadCachedFeedGuardCandidates(
             Log.i(TAG, "Feed guard cache stale for version=$hostVersionName; re-discovering")
             return 0
         }
+        if (feedGuardCacheModuleKey() != properties.getProperty("moduleVersion")) {
+            Log.i(TAG, "Feed guard cache stale for moduleVersion=${feedGuardCacheModuleKey()}; re-discovering")
+            return 0
+        }
         feedGuardCachedComponentNames = properties.getProperty("components").orEmpty()
             .split(',').filter { it.isNotBlank() }
         feedGuardCachedWrapperNames = properties.getProperty("wrappers").orEmpty()
@@ -1974,6 +1983,7 @@ fun saveFeedGuardCandidateCache(context: Context, hostVersionName: String) {
         val file = File(context.cacheDir, FEED_GUARD_CACHE_FILE)
         val properties = Properties()
         properties.setProperty("version", hostVersionName)
+        properties.setProperty("moduleVersion", feedGuardCacheModuleKey())
         properties.setProperty("components", components.joinToString(","))
         properties.setProperty("wrappers", wrappers.joinToString(","))
         file.outputStream().use { properties.store(it, null) }
