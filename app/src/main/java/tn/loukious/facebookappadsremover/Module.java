@@ -19,19 +19,19 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
 public final class Module implements IXposedHookLoadPackage {
 
     private static final String TAG = "FacebookAppAdsRemover";
-    private static final long[] FAST_SOURCE_DELAYS_MS = {100L, 250L, 750L, 1_500L, 2_500L};
+    private static final long[] EARLY_GUARD_DELAYS_MS = {100L, 250L, 750L, 1_500L, 2_500L};
     private static final long[] FAST_COMPONENT_DELAYS_MS = {3_500L, 5_000L, 7_500L};
     private static final long[] INSTALL_DELAYS_MS = {3_000L, 10_000L, 25_000L};
     private static volatile boolean sDexKitLoaded = false;
     private static final AtomicBoolean sAttachHookInstalled = new AtomicBoolean(false);
     private static final AtomicBoolean sDexReadyHookInstalled = new AtomicBoolean(false);
-    private static final AtomicBoolean sFastInstallInProgress = new AtomicBoolean(false);
-    private static final AtomicBoolean sFastSourceHooksInstalled = new AtomicBoolean(false);
     private static final AtomicBoolean sComponentGuardInstallInProgress = new AtomicBoolean(false);
     private static final AtomicBoolean sFeedComponentGuardInstalled = new AtomicBoolean(false);
     private static final AtomicBoolean sInstallInProgress = new AtomicBoolean(false);
     private static final AtomicBoolean sHooksInstalled = new AtomicBoolean(false);
     private static volatile XC_MethodHook.Unhook sClassLoadNotifierUnhook;
+    private static volatile Application sApplication;
+    private static volatile String sHostVersionName;
 
     private static void debugLogInfo(String message) {
         if (BuildConfig.DEBUG) {
@@ -64,10 +64,65 @@ public final class Module implements IXposedHookLoadPackage {
             @Override
             protected void afterHookedMethod(MethodHookParam param) {
                 Application application = (Application) param.thisObject;
+                sApplication = application;
+                loadCachedFeedGuardCandidates(application);
+                // The game webview can register its Javascript bridge before the
+                // DexKit scan installs the main hooks; watch for it immediately.
+                try {
+                    PatchesKt.installGameAdJavascriptInterfaceBridgeHook();
+                } catch (Throwable throwable) {
+                    debugLogError("Failed to install game bridge watcher", throwable);
+                }
                 scheduleHookInstallAttempts(application.getClassLoader());
             }
         });
         debugLogInfo("Waiting for Facebook Application.attach before scanning secondary dex");
+    }
+
+    // The cached initial News Feed renders before the DexKit scan completes, so
+    // the guard pair discovered on a previous launch of the same Facebook build
+    // is re-registered here (~100ms after attach) to hook before that render.
+    private static void loadCachedFeedGuardCandidates(Application application) {
+        try {
+            int registered = PatchesKt.loadCachedFeedGuardCandidates(
+                    application,
+                    application.getClassLoader(),
+                    resolveHostVersionName(application)
+            );
+            if (registered > 0) {
+                debugLogInfo("Registered " + registered + " cached feed guard candidate(s)");
+            }
+        } catch (Throwable throwable) {
+            debugLogError("Failed to load cached feed guard candidates", throwable);
+        }
+    }
+
+    private static String resolveHostVersionName(Application application) {
+        String versionName = sHostVersionName;
+        if (versionName != null) {
+            return versionName;
+        }
+        try {
+            versionName = application.getPackageManager()
+                    .getPackageInfo(application.getPackageName(), 0).versionName;
+        } catch (Throwable throwable) {
+            debugLogError("Failed to resolve host version name", throwable);
+            versionName = "";
+        }
+        sHostVersionName = versionName;
+        return versionName;
+    }
+
+    private static void saveFeedGuardCandidateCache() {
+        Application application = sApplication;
+        if (application == null) {
+            return;
+        }
+        try {
+            PatchesKt.saveFeedGuardCandidateCache(application, resolveHostVersionName(application));
+        } catch (Throwable throwable) {
+            debugLogError("Failed to save feed guard candidates", throwable);
+        }
     }
 
     private static void installFacebookDexReadyHook(ClassLoader classLoader) {
@@ -147,7 +202,11 @@ public final class Module implements IXposedHookLoadPackage {
             @Override
             protected void afterHookedMethod(MethodHookParam param) {
                 Class<?> loadedClass = param.args[0] instanceof Class ? (Class<?>) param.args[0] : null;
-                if (loadedClass == null || !isFastFeedTargetClass(loadedClass.getName())) {
+                if (loadedClass == null) {
+                    return;
+                }
+                String componentName = PatchesKt.lithoComponentNameOf(loadedClass);
+                if (componentName == null || !PatchesKt.registerFeedGuardCandidate(loadedClass, componentName)) {
                     return;
                 }
 
@@ -156,63 +215,26 @@ public final class Module implements IXposedHookLoadPackage {
                     targetLoader = classLoader;
                 }
                 debugLogInfo(
-                        "Observed FB 571 feed source class load=" + loadedClass.getName() +
+                        "Observed feed component class load=" + loadedClass.getName() +
+                                " component=" + componentName +
                                 " loader=" + targetLoader.getClass().getName()
                 );
                 tryInstallFastFeedHooksAtDexReady(targetLoader, "class-load notification");
             }
         });
-        debugLogInfo("Waiting for FB 571 feed source class load before installing decoded response hooks");
-    }
-
-    private static boolean isFastFeedTargetClass(String className) {
-        return "X.1fM".equals(className)
-                || "X.1eY".equals(className)
-                || "X.21p".equals(className)
-                || "X.211".equals(className)
-                || "X.baJ".equals(className)
-                || "X.bB9".equals(className)
-                || "X.baK".equals(className)
-                || "X.bBA".equals(className)
-                || "X.21O".equals(className)
-                || "X.20a".equals(className)
-                || "X.1vr".equals(className)
-                || "X.3YX".equals(className)
-                || "X.3Xk".equals(className)
-                || "X.2OT".equals(className)
-                || "X.2Oc".equals(className)
-                || "X.2mm".equals(className)
-                || "X.2Nf".equals(className)
-                || "X.2No".equals(className);
+        debugLogInfo("Waiting for feed component class load before installing the component guard");
     }
 
     private static void tryInstallFastFeedHooksAtDexReady(
             ClassLoader classLoader,
             String readinessSource
     ) {
-        if (!sFastSourceHooksInstalled.get() && sFastInstallInProgress.compareAndSet(false, true)) {
-            try {
-                if (PatchesKt.installFacebook571FeedSourceFastPath(classLoader)) {
-                    sFastSourceHooksInstalled.set(true);
-                    debugLogInfo(
-                            "FB 571 decoded response hooks installed synchronously at " + readinessSource
-                    );
-                }
-            } catch (Throwable throwable) {
-                debugLogError(
-                        "Failed FB 571 decoded response install at " + readinessSource,
-                        throwable
-                );
-            } finally {
-                sFastInstallInProgress.set(false);
-            }
-        }
         tryInstallFeedComponentGuard(classLoader, readinessSource);
         removeClassLoadNotifierHook();
     }
 
     private static void removeClassLoadNotifierHook() {
-        if (!sFastSourceHooksInstalled.get() || !sFeedComponentGuardInstalled.get()) {
+        if (!sFeedComponentGuardInstalled.get()) {
             return;
         }
         XC_MethodHook.Unhook unhook = sClassLoadNotifierUnhook;
@@ -221,24 +243,13 @@ public final class Module implements IXposedHookLoadPackage {
         }
         sClassLoadNotifierUnhook = null;
         unhook.unhook();
-        debugLogInfo("Removed FB 571 class-load notifier after decoded hooks became active");
+        debugLogInfo("Removed class-load notifier after the component guard became active");
     }
 
     private static void scheduleHookInstallAttempts(ClassLoader classLoader) {
         Handler handler = new Handler(Looper.getMainLooper());
-        tryInstallFastFeedSourceHooks(classLoader, 0);
         tryInstallFeedComponentGuard(classLoader, "Application.attach");
-        for (int attempt = 0; attempt < FAST_SOURCE_DELAYS_MS.length; attempt++) {
-            final int attemptNumber = attempt + 1;
-            handler.postDelayed(
-                    () -> new Thread(
-                            () -> tryInstallFastFeedSourceHooks(classLoader, attemptNumber),
-                            "FacebookFeedFastInit-" + attemptNumber
-                    ).start(),
-                    FAST_SOURCE_DELAYS_MS[attempt]
-            );
-        }
-        for (int attempt = 0; attempt < FAST_COMPONENT_DELAYS_MS.length; attempt++) {
+        for (int attempt = 0; attempt < EARLY_GUARD_DELAYS_MS.length; attempt++) {
             final int attemptNumber = attempt + 1;
             handler.postDelayed(
                     () -> new Thread(
@@ -247,6 +258,19 @@ public final class Module implements IXposedHookLoadPackage {
                                     "component attempt=" + attemptNumber
                             ),
                             "FacebookFeedComponentInit-" + attemptNumber
+                    ).start(),
+                    EARLY_GUARD_DELAYS_MS[attempt]
+            );
+        }
+        for (int attempt = 0; attempt < FAST_COMPONENT_DELAYS_MS.length; attempt++) {
+            final int attemptNumber = attempt + 1;
+            handler.postDelayed(
+                    () -> new Thread(
+                            () -> tryInstallFeedComponentGuard(
+                                    classLoader,
+                                    "late component attempt=" + attemptNumber
+                            ),
+                            "FacebookFeedComponentLate-" + attemptNumber
                     ).start(),
                     FAST_COMPONENT_DELAYS_MS[attempt]
             );
@@ -263,23 +287,6 @@ public final class Module implements IXposedHookLoadPackage {
         }
     }
 
-    private static void tryInstallFastFeedSourceHooks(ClassLoader classLoader, int attemptNumber) {
-        if (!sFastSourceHooksInstalled.get() && sFastInstallInProgress.compareAndSet(false, true)) {
-            try {
-                if (PatchesKt.installFacebook571FeedSourceFastPath(classLoader)) {
-                    sFastSourceHooksInstalled.set(true);
-                    debugLogInfo("FB 571 decoded response hooks installed on attempt=" + attemptNumber);
-                }
-            } catch (Throwable throwable) {
-                debugLogError("Failed FB 571 fast decoded response install on attempt=" + attemptNumber, throwable);
-            } finally {
-                sFastInstallInProgress.set(false);
-            }
-        }
-        tryInstallFeedComponentGuard(classLoader, "source attempt=" + attemptNumber);
-        removeClassLoadNotifierHook();
-    }
-
     private static void tryInstallFeedComponentGuard(
             ClassLoader classLoader,
             String readinessSource
@@ -291,15 +298,15 @@ public final class Module implements IXposedHookLoadPackage {
             return;
         }
         try {
-            if (PatchesKt.installFacebook571FeedComponentGuard(classLoader)) {
+            if (PatchesKt.installFacebookFeedComponentGuard(classLoader)) {
                 sFeedComponentGuardInstalled.set(true);
                 debugLogInfo(
-                        "FB 571 sponsored feed component guard installed at " + readinessSource
+                        "Sponsored feed component guard installed at " + readinessSource
                 );
             }
         } catch (Throwable throwable) {
             debugLogError(
-                    "Failed FB 571 sponsored feed component guard at " + readinessSource,
+                    "Failed sponsored feed component guard at " + readinessSource,
                     throwable
             );
         } finally {
@@ -316,6 +323,7 @@ public final class Module implements IXposedHookLoadPackage {
             debugLogInfo("Scanning Facebook secondary dex, attempt=" + attemptNumber);
             if (PatchesKt.installFacebookAdRemover(classLoader, bridge)) {
                 sHooksInstalled.set(true);
+                saveFeedGuardCandidateCache();
                 tryInstallFeedComponentGuard(classLoader, "full DexKit readiness");
                 removeClassLoadNotifierHook();
                 debugLogInfo("Facebook ad remover hooks installed on attempt=" + attemptNumber);

@@ -2,7 +2,7 @@
 
 An LSPosed/Xposed module for `com.facebook.katana` that removes ads using structural DexKit discovery plus guarded, version-specific fast paths.
 
-Current target: Facebook `571.0.0.44.73` (`473224484`), module `1.6`.
+Current target: Facebook `576.0.0.42.73`, module `1.8`. Older versions (571 and below) are no longer supported.
 
 ## Scope
 
@@ -18,7 +18,7 @@ Current target: Facebook `571.0.0.44.73` (`473224484`), module `1.6`.
 - Stable strings and structural signatures are much more reliable than direct obfuscated names.
 - Feed ads are inserted at multiple layers. Blocking only one layer is not enough.
 - The main News Feed request is a mixed GraphQL payload containing organic and sponsored units. Blocking its host or request would also block the organic feed.
-- The earliest safe client boundary found so far is the dedicated story-ad source/provider layer identified by `ads_deletion`, `ads_insertion`, and `StoryAdsInDisc`. The module blocks fetch, merge, deferred-update, and insertion methods there before ad units enter feed pools.
+- The earliest safe client boundary found so far is the dedicated story-ad store layer identified by `AdsPaginatingNetworkAdBucketFetcher`, `FbStoryAdInDiscStoreImpl`, `IN_DISC_METADATA_KEY`, and `AD_BUCKETS_KEY`. The module blocks fetch, merge, deferred-update, and insertion methods there before ad units enter feed pools. The telemetry labels `ads_deletion`/`ads_insertion` are deliberately NOT used as class selectors anymore: unrelated story viewer classes log those labels, and hooking them blanks the story viewer (576's `X.BAl` was the story viewer's own `onDataChanged` handler).
 - Game ads are not a single pipeline either. Quicksilver request hooks, postMessage hooks, and UI activity fallbacks all matter.
 - Blocking `AudienceNetworkActivity` at `startActivity(...)` was too early and caused game hangs. Letting it launch and closing it immediately from activity lifecycle hooks worked better.
 
@@ -36,12 +36,16 @@ Current target: Facebook `571.0.0.44.73` (`473224484`), module `1.6`.
 - Block story ad providers by intercepting merge/fetch/update style methods.
 - Keep marker-based view removal as a last-resort safety net, not the primary News Feed path.
 
-#### Facebook 571 Findings
+#### Facebook 576 Findings
 
-- Decoded feed entry points are `X.21p.Ani`, `X.baJ.Ani`, and `X.baK.Ani`; fresh list mutations pass through `X.1fM.A0B`, while `X.21O.A03` accepts sponsored-pool entries.
-- One surviving ad bypassed those lists as a direct `GraphQLFeedUnitEdge`. Runtime tracing found `LithoView -> X.2Oc.A03 -> X.2OT.A05 -> GraphQLFeedUnitEdge`, whose `B3H()` category was `SPONSORED`.
-- `X.2Oc.A1H` and `X.2OT.A1H` are now guarded before Litho layout. They return no layout only when the embedded edge is definitively sponsored, preventing both the visible flash and the blank row while preserving `FB_SHORTS`/Reels and organic categories.
-- Fast hooks are retried around `Application.attach` and secondary-dex readiness. The class-load notifier is removed after both decoded-response and component guards are active.
+- The feed component pair (576: wrapper `X.2q8`, component `X.2q4`) is discovered by Litho component name, not by obfuscated class name. Litho generated components pass a stable spec name to their base class constructor — `"NewsFeedFeedUnitComponent"` for the feed unit component and `"LoggingComponent"` for the generic wrapper Litho renders feed units through — and those strings survive Facebook's obfuscator. The class-load notifier reads the name reflectively (the generated base stores it in a final String field filled by a String constructor; the class is instantiated through its no-arg constructor to read it), and the full DexKit pass finds the same classes with an exact `usingStrings` match as a backstop.
+- The cached initial News Feed (including a sponsored slot) assembles and renders within ~2s of a cold start — before any DexKit scan can finish. To win that race, the discovered guard pair is persisted in the host's `cacheDir` keyed by the Facebook version, and later launches load it right after `Application.attach`. The cached class names still fail `Class.forName` at attach time (the secondary dex is not configured yet), so every timed guard attempt re-tries registering them; the guard then installs ~200ms after attach, before the cached feed renders. This is what removes the "second feed item is a sponsored post" on force-close/reopen. A Facebook update changes the version key and falls back to the DexKit discovery, which then rewrites the cache.
+- The wrapper renders via `A1F` only (no `A1H`), so the guard matches Litho layout entry points by shape — instance methods taking the Litho context (`X.3Qp`) with a non-primitive return — instead of requiring a method literally named `A1H`. Static builder factories with the same shape are excluded.
+- The edge and wrapper-child fields are resolved structurally: the component's edge field is the one whose type is (or implements) the feed-item contract exposing `GraphQLFeedStoryCategory` (576: `X.3yV` via `B9B()`); the wrapper's child field is the one assignable to the component class.
+- `StoryAdsInDisc` no longer exists anywhere in 576, and the story ad store moved to `X.BEC`. See the selector change above.
+- The feed-item contract hooks (`X.3YX`/`X.3Xk` on 576) and the CSR/network/pool hooks all resolve structurally via DexKit (`X.21r` CSR filters, `X.21e` sponsored pool, `X.BEC` story ad store, late feed list hooks). The hardcoded 571 contract-class hints (`X.3YX`/`X.3Xk`), the Audience Network listener names (`X.mGv`/`X.mGo`), the Quicksilver handler name (`X.edO`), and the `X.2Jy` feed-object hint were removed entirely — the inspector and edge-field resolution work structurally (GraphQL edge class name, `GraphQLFeedUnitEdge`/`GraphQL`+`Feed` name matching, feed-story-category enum constants), and the AN reward no longer depends on them since the webview-delivery rewrite delivers the reward.
+- The 571 hardcoded fast paths (`X.21p.Ani`, `X.1fM.A0B`, `X.21O.A03`, `X.2mm.A3F`, `X.1vr.addNewEdgeToCollection`, the `X.9xH`-style curated story-ad class list) were removed: they were all dead on 576, and the curated list even matched a network-connectivity helper (`X.9xH`) whose shape coincidentally fit the deferred-update rule. The seeded component guard seeds (`X.2q4`/`X.2q8`) were removed with the Litho-name discovery above.
+- The global `addView` safety-net hook must never call `View.createAccessibilityNodeInfo()` on freshly added views. On 576, building the accessibility node mid-mount runs Facebook's custom-view accessibility code with side effects, and page-profile header text ("Sign up", "Followers", "posts") ends up blank after pull-to-refresh. `collectViewMarkerTexts` therefore reads only `contentDescription` and `text`.
 
 ### Native / Network Boundary
 
@@ -53,7 +57,8 @@ The preferred interception point is therefore after GraphQL data has been decode
 
 - Resolve Quicksilver ad request methods by their stable JSON error strings.
 - Hook the Quicksilver `postMessage(String, String)` bridge as a second request-layer fallback.
-- Resolve ad requests as a no-op success payload where possible so the caller does not hang waiting on the bridge.
+- The runtime delegate the game webview actually uses (576: `X.q10`) is NOT the DexKit-discovered service delegate (`X.gJA`); it is caught at registration by hooking `WebView.addJavascriptInterface`. It is a thin delegate with no promise-resolve helper on its class, so request payloads can only be snapshotted there, not resolved.
+- The promise result is delivered back into the webview as `evaluateJavascript("e = new Event('message');e.data = {...};window.dispatchEvent(e);")`. The module rewrites that JSON in place: for rewarded requests (`getrewardedvideoasync`/`getrewardedinterstitialasync`, and `showadasync` with a rewarded ad instance) error fields are dropped and `success/completed/didComplete/watched/rewarded` + `completionGesture:"post"` are forced, so the game grants the reward with no ad shown. The rewrite also covers `loadUrl` and `postWebMessage` deliveries. Note the envelope `type` stays `"rejectpromise"` on the rewritten `showadasync` responses — the game reads the outcome fields in `data`, and converting the envelope is unnecessary.
 - Close `AudienceNetworkActivity`, `AudienceNetworkRemoteActivity`, and `NekoPlayableAdActivity` from lifecycle hooks as UI-level fallbacks.
 - Only hard-block the playable activity launch path directly; Audience Network activity launches are allowed so their internal close/error flow can run before the activity is closed.
 
