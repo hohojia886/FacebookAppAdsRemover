@@ -27,6 +27,8 @@ public final class Module implements IXposedHookLoadPackage {
     private static final AtomicBoolean sDexReadyHookInstalled = new AtomicBoolean(false);
     private static final AtomicBoolean sComponentGuardInstallInProgress = new AtomicBoolean(false);
     private static final AtomicBoolean sFeedComponentGuardInstalled = new AtomicBoolean(false);
+    private static final AtomicBoolean sMarketplaceNetGuardInstalled = new AtomicBoolean(false);
+    private static final AtomicBoolean sMarketplaceNetGuardInProgress = new AtomicBoolean(false);
     private static final AtomicBoolean sInstallInProgress = new AtomicBoolean(false);
     private static final AtomicBoolean sHooksInstalled = new AtomicBoolean(false);
     private static volatile XC_MethodHook.Unhook sClassLoadNotifierUnhook;
@@ -66,12 +68,22 @@ public final class Module implements IXposedHookLoadPackage {
                 Application application = (Application) param.thisObject;
                 sApplication = application;
                 loadCachedFeedGuardCandidates(application);
+                loadCachedReelsGuard(application);
+                loadCachedMarketplaceNetGuard(application);
                 // The game webview can register its Javascript bridge before the
                 // DexKit scan installs the main hooks; watch for it immediately.
                 try {
                     PatchesKt.installGameAdJavascriptInterfaceBridgeHook();
                 } catch (Throwable throwable) {
                     debugLogError("Failed to install game bridge watcher", throwable);
+                }
+                // The framework-only view-level safety net (marker-based ad
+                // hiding) must be active before the first feed/reels/marketplace
+                // content mounts, which happens well before the DexKit scan.
+                try {
+                    PatchesKt.installGlobalAdSurfaceFallbacksEarly();
+                } catch (Throwable throwable) {
+                    debugLogError("Failed to install early ad surface fallbacks", throwable);
                 }
                 scheduleHookInstallAttempts(application.getClassLoader());
             }
@@ -122,6 +134,92 @@ public final class Module implements IXposedHookLoadPackage {
             PatchesKt.saveFeedGuardCandidateCache(application, resolveHostVersionName(application));
         } catch (Throwable throwable) {
             debugLogError("Failed to save feed guard candidates", throwable);
+        }
+    }
+
+    // Same cold-start race as the feed guard: the reels ad render block flashes
+    // an ad until the full DexKit pass installs seconds after launch, so the
+    // resolved reels targets are re-installed from cache right after attach.
+    private static void loadCachedReelsGuard(Application application) {
+        try {
+            PatchesKt.installReelsGuardFromCache(
+                    application,
+                    application.getClassLoader(),
+                    resolveHostVersionName(application)
+            );
+        } catch (Throwable throwable) {
+            debugLogError("Failed to load cached reels guard", throwable);
+        }
+    }
+
+    private static void saveReelsGuardCache() {
+        Application application = sApplication;
+        if (application == null) {
+            return;
+        }
+        try {
+            PatchesKt.saveReelsGuardCache(application, resolveHostVersionName(application));
+        } catch (Throwable throwable) {
+            debugLogError("Failed to save reels guard cache", throwable);
+        }
+    }
+
+    // The marketplace feed's GraphQL query goes out within seconds of launch,
+    // before the DexKit scan installs the Networking-module hooks. The resolved
+    // module class name from a previous launch is re-hooked here (same pattern
+    // as the feed guard cache), with timed retries while the secondary dex
+    // finishes configuring.
+    private static void loadCachedMarketplaceNetGuard(Application application) {
+        try {
+            if (PatchesKt.installMarketplaceNetGuardFromCache(
+                    application,
+                    application.getClassLoader(),
+                    resolveHostVersionName(application)
+            )) {
+                sMarketplaceNetGuardInstalled.set(true);
+                debugLogInfo("Marketplace net guard installed from cache at attach");
+            }
+        } catch (Throwable throwable) {
+            debugLogError("Failed to load cached marketplace net guard", throwable);
+        }
+    }
+
+    private static void retryCachedMarketplaceNetGuard(ClassLoader classLoader) {
+        if (sMarketplaceNetGuardInstalled.get()) {
+            return;
+        }
+        if (!sMarketplaceNetGuardInProgress.compareAndSet(false, true)) {
+            return;
+        }
+        try {
+            Application application = sApplication;
+            if (application != null && PatchesKt.installMarketplaceNetGuardFromCache(
+                    application,
+                    classLoader,
+                    resolveHostVersionName(application)
+            )) {
+                sMarketplaceNetGuardInstalled.set(true);
+                debugLogInfo("Marketplace net guard installed from cache on retry");
+            }
+        } catch (Throwable throwable) {
+            debugLogError("Failed to retry cached marketplace net guard", throwable);
+        } finally {
+            sMarketplaceNetGuardInProgress.set(false);
+        }
+    }
+
+    private static void saveMarketplaceNetGuardCache() {
+        Application application = sApplication;
+        if (application == null) {
+            return;
+        }
+        try {
+            PatchesKt.saveMarketplaceNetGuardCache(
+                    application,
+                    resolveHostVersionName(application)
+            );
+        } catch (Throwable throwable) {
+            debugLogError("Failed to save marketplace net guard cache", throwable);
         }
     }
 
@@ -261,15 +359,25 @@ public final class Module implements IXposedHookLoadPackage {
                     ).start(),
                     EARLY_GUARD_DELAYS_MS[attempt]
             );
+            handler.postDelayed(
+                    () -> new Thread(
+                            () -> retryCachedMarketplaceNetGuard(classLoader),
+                            "FacebookMarketplaceNetInit-" + attemptNumber
+                    ).start(),
+                    EARLY_GUARD_DELAYS_MS[attempt]
+            );
         }
         for (int attempt = 0; attempt < FAST_COMPONENT_DELAYS_MS.length; attempt++) {
             final int attemptNumber = attempt + 1;
             handler.postDelayed(
                     () -> new Thread(
-                            () -> tryInstallFeedComponentGuard(
-                                    classLoader,
-                                    "late component attempt=" + attemptNumber
-                            ),
+                            () -> {
+                                tryInstallFeedComponentGuard(
+                                        classLoader,
+                                        "late component attempt=" + attemptNumber
+                                );
+                                retryCachedMarketplaceNetGuard(classLoader);
+                            },
                             "FacebookFeedComponentLate-" + attemptNumber
                     ).start(),
                     FAST_COMPONENT_DELAYS_MS[attempt]
@@ -324,6 +432,8 @@ public final class Module implements IXposedHookLoadPackage {
             if (PatchesKt.installFacebookAdRemover(classLoader, bridge)) {
                 sHooksInstalled.set(true);
                 saveFeedGuardCandidateCache();
+                saveReelsGuardCache();
+                saveMarketplaceNetGuardCache();
                 tryInstallFeedComponentGuard(classLoader, "full DexKit readiness");
                 removeClassLoadNotifierHook();
                 debugLogInfo("Facebook ad remover hooks installed on attempt=" + attemptNumber);

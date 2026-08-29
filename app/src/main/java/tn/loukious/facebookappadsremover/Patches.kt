@@ -29,6 +29,8 @@ import java.lang.reflect.Field
 import java.lang.reflect.Method
 import java.lang.reflect.Modifier
 import java.io.File
+import java.net.URLDecoder
+import java.net.URLEncoder
 import java.util.Collections
 import java.util.Properties
 import java.util.ArrayDeque
@@ -37,6 +39,7 @@ import java.util.LinkedHashMap
 import java.util.Optional
 import java.util.WeakHashMap
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
@@ -174,6 +177,7 @@ private val recentGameAdTargets = Collections.synchronizedMap(WeakHashMap<Any, L
 private val recentGameAdPayloads = Collections.synchronizedList(ArrayList<GameAdPayloadSnapshot>())
 private val hookHitCounters = ConcurrentHashMap<String, AtomicInteger>()
 private val gameAdSurfaceHooksInstalled = AtomicInteger(0)
+private val gameAdActivityLifecycleHookInstalled = AtomicBoolean(false)
 private val gameAdResultHookedClasses = ConcurrentHashMap.newKeySet<String>()
 private val gameAdServiceDispatchHookedClasses = ConcurrentHashMap.newKeySet<String>()
 private val gameAdSystemDiagnosticsInstalled = AtomicInteger(0)
@@ -337,6 +341,16 @@ private val FEED_REEL_CTA_AD_MARKER_TOKENS = listOf(
     "send message",
     "your business",
     "your ad"
+)
+
+// Tagged-product sticker pills overlaid on organic reels compose their
+// accessibility label as "<creator> - <product>, <CTA>" (e.g.
+// "Zack D. Films - Hat (Denim), Shop now"). Requiring the full composite
+// shape keeps plain "Shop now" buttons on other surfaces untouched.
+private val REELS_SHOPPING_STICKER_CTA_TOKENS = listOf(
+    "shop now",
+    "buy now",
+    "order now"
 )
 
 private val REELS_AD_SIGNAL_TOKENS = listOf(
@@ -1120,6 +1134,14 @@ fun installFacebookAdRemover(classLoader: ClassLoader, bridge: DexKitBridge): Bo
                     )
                 }
         }
+        runCatching { installReelsAdDiagnostics(classLoader, bridge) }
+            .onFailure { Log.w(TAG, "Failed to install Reels ad diagnostics", it) }
+        runCatching { installMarketplaceAdRenderBlock(classLoader, bridge) }
+            .onFailure { Log.w(TAG, "Failed to install Marketplace ad render block", it) }
+        runCatching { installMarketplaceAdsQueryBlock(classLoader, bridge) }
+            .onFailure { Log.w(TAG, "Failed to install Marketplace ads query block", it) }
+        runCatching { installMarketplaceFeedResponseFilter(classLoader, bridge) }
+            .onFailure { Log.w(TAG, "Failed to install Marketplace response probe", it) }
         if (ENABLE_FEED_CSR_FILTER_HOOKS) {
             hooks.feedCsrFilterHooks.forEach { hook ->
                 runCatching { hookFeedCsrFilterInput(hook, feedItemInspector) }
@@ -1149,8 +1171,19 @@ fun installFacebookAdRemover(classLoader: ClassLoader, bridge: DexKitBridge): Bo
             Log.i(TAG, "Skipped late feed list hooks to isolate feed Reels carousel loading")
         }
         if (ENABLE_STORY_POOL_ADD_HOOKS) {
+            // Diagnostic: log every item the shorts (reels) pool admits so a
+            // full-page reels ad that slips through unclassified is visible.
+            val shortsPoolClassNames = runCatching {
+                bridge.findClass {
+                    matcher {
+                        usingStrings("FbShorts Pool")
+                    }
+                }.map { it.name }.toSet()
+            }.getOrDefault(emptySet())
+            Log.i(TAG, "Shorts pool classes for diagnostics: $shortsPoolClassNames")
             hooks.storyPoolAddMethods.forEach { method ->
-                runCatching { hookStoryPoolAdd(method, feedItemInspector) }
+                val logAllowed = method.declaringClass.name in shortsPoolClassNames
+                runCatching { hookStoryPoolAdd(method, feedItemInspector, logAllowed) }
                     .onFailure {
                         Log.e(TAG, "Failed to hook story pool add ${method.declaringClass.name}.${method.name}", it)
                     }
@@ -2599,19 +2632,25 @@ private fun resolveStoryPoolAddMethods(
         bridge,
         listOf("CSRStoryPoolCoordinator", "FeedStoryPoolCoordinator")
     ).forEach { candidate ->
+        // Hook every instance boolean single-arg method on the coordinator, not
+        // just the first match: 576's shorts pool (X.1mn) exposes both a static
+        // eligibility helper and the real pool-add ABd, and findFirst picked the
+        // helper, leaving the FbShorts pool's add path unhooked.
         candidate.findMethod {
-            findFirst = true
             matcher {
                 returnType = "boolean"
                 paramTypes = listOf(null)
             }
-        }.firstMethodInstanceOrNull(classLoader)?.let { method ->
+        }.mapNotNull { methodData ->
+            runCatching { methodData.getMethodInstance(classLoader) }.getOrNull()
+        }.forEach { method ->
             methods.putIfAbsent("${method.declaringClass.name}.${method.name}", method)
         }
     }
 
     return methods.values.filter { method ->
-        !Modifier.isAbstract(method.modifiers) &&
+        !Modifier.isStatic(method.modifiers) &&
+            !Modifier.isAbstract(method.modifiers) &&
             !method.declaringClass.isInterface &&
             !Modifier.isAbstract(method.declaringClass.modifiers)
     }.toList()
@@ -2718,6 +2757,1648 @@ private fun resolveLithoRenderMethod(componentClass: Class<*>): Method? {
             method.returnType != Any::class.java &&
             method.returnType.isAssignableFrom(componentClass)
     }?.apply { isAccessible = true }
+}
+
+// ---------------------------------------------------------------------------
+// Full-page sponsored Reels ads (576).
+//
+// The sponsored reel is an organic-shaped story (comments, reactions,
+// follower social context) injected into the Reels feed, gated server-side
+// ("reels_ads_ap_plus_newsfeed_qp"), so only some accounts see it. Its
+// comment flyout is rendered by the ReelsAdsCaptionCommentComponent (found
+// via the stable CallerContext string), whose construction site reveals the
+// reels item model: field A04 (type C8Wm) is the ad model and is non-null
+// only for ads — the structural "is this reel an ad" marker.
+// ---------------------------------------------------------------------------
+
+private val reelsAdDiagnosticsInstalled = AtomicInteger(0)
+private val reelsAdDiagnosticsLogged = AtomicInteger(0)
+
+private fun installReelsAdDiagnostics(classLoader: ClassLoader, bridge: DexKitBridge) {
+    if (!reelsAdDiagnosticsInstalled.compareAndSet(0, 1)) return
+
+    val componentClasses = LinkedHashMap<String, Class<*>>()
+    bridge.findClass {
+        matcher {
+            usingStrings("ReelsAdsCaptionCommentComponent")
+        }
+    }.forEach { candidate ->
+        val clazz = runCatching { candidate.getInstance(classLoader) }.getOrNull() ?: return@forEach
+        componentClasses.putIfAbsent(clazz.name, clazz)
+    }
+    if (componentClasses.isEmpty()) {
+        Log.w(TAG, "Reels ad caption component not found via string")
+        return
+    }
+
+    componentClasses.values.forEach { clazz ->
+        // Constructor: (FbUserSession, C8YW ad-model, C3PA) per C28D case 13.
+        clazz.declaredConstructors.forEach { constructor ->
+            if (constructor.parameterCount in 1..4) {
+                constructor.isAccessible = true
+                XposedBridge.hookMethod(constructor, object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        val count = reelsAdDiagnosticsLogged.incrementAndGet()
+                        if (count > 60) return
+                        val args = param.args.orEmpty().joinToString(" | ") { arg ->
+                            "${arg?.javaClass?.name}:${formatDiagValue(arg)}"
+                        }
+                        Log.i(TAG, "ReelsAdDiag captionCtor ${clazz.name} args=[$args]")
+                        param.thisObject?.let { describeReelsAdModelChain(it) }
+                    }
+                })
+                Log.i(TAG, "Hooked Reels ad caption ctor ${clazz.name}")
+            }
+        }
+
+        resolveLithoRenderMethod(clazz)?.let { render ->
+            XposedBridge.hookMethod(render, object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    val count = reelsAdDiagnosticsLogged.incrementAndGet()
+                    if (count > 60) return
+                    Log.i(
+                        TAG,
+                        "ReelsAdDiag captionRender ${clazz.name}.${render.name} " +
+                            "this=${formatDiagValue(param.thisObject)} args=${formatDiagArgs(param.args)}"
+                    )
+                }
+            })
+            Log.i(TAG, "Hooked Reels ad caption render ${clazz.name}.${render.name}")
+        }
+    }
+
+    installReelsAdPipelineProbes(classLoader, bridge)
+    installReelsInstreamAdBlock(classLoader, bridge)
+    installReelsAdListFilters(classLoader, bridge)
+    Log.i(TAG, "Reels ad diagnostics installed components=${componentClasses.keys}")
+}
+
+// Block full-page Reels ads by forcing the instream eligibility gate to report
+// "suppress ads". On 576 the gate (X.QNM.A00) is consulted at every decision
+// point of the instream state machine (entry check, fetch trigger, fetch-result
+// insertion) and a true result means "do not serve an ad" — early return,
+// disabled state, or skipped insertion. The gate class is referenced only by
+// the reels instream pipeline, so forcing it cannot affect other surfaces.
+// Resolution is structural: an instance method returning boolean with exactly
+// 5 parameters whose first is FbUserSession and last is int-Integer, on a tiny
+// class that carries an ImmutableList cache field.
+private fun installReelsInstreamAdBlock(classLoader: ClassLoader, bridge: DexKitBridge) {
+    val userSessionClass = runCatching {
+        Class.forName("com.facebook.auth.usersession.FbUserSession", false, classLoader)
+    }.getOrNull() ?: run {
+        Log.w(TAG, "Reels instream gate: FbUserSession class not found; skipping")
+        return
+    }
+    val immutableListClass = runCatching {
+        Class.forName("com.google.common.collect.ImmutableList", false, classLoader)
+    }.getOrNull()
+
+    val candidates = runCatching {
+        bridge.findMethod {
+            matcher {
+                returnType = "boolean"
+                paramTypes = listOf(
+                    "com.facebook.auth.usersession.FbUserSession",
+                    null,
+                    null,
+                    null,
+                    "java.lang.Integer"
+                )
+            }
+        }
+    }.getOrNull().orEmpty()
+
+    var blocked = 0
+    candidates.forEach { methodData ->
+        val method = runCatching { methodData.getMethodInstance(classLoader) }.getOrNull()
+            ?: return@forEach
+        if (Modifier.isStatic(method.modifiers)) return@forEach
+        val clazz = method.declaringClass
+
+        // The gate class declares exactly one such method on 576; anything with
+        // more than one matching method is a different (shared) helper.
+        val gateMethods = clazz.declaredMethods.filter { candidate ->
+            !Modifier.isStatic(candidate.modifiers) &&
+                candidate.returnType == java.lang.Boolean.TYPE &&
+                candidate.parameterTypes.size == 5 &&
+                candidate.parameterTypes.first() == userSessionClass &&
+                candidate.parameterTypes.last() == java.lang.Integer::class.java
+        }
+        if (gateMethods.size != 1 || gateMethods[0] != method) return@forEach
+        if (immutableListClass != null &&
+            clazz.declaredFields.none { it.type == immutableListClass }
+        ) return@forEach
+
+        method.isAccessible = true
+        XposedBridge.hookMethod(method, object : XC_MethodHook() {
+            override fun beforeHookedMethod(param: MethodHookParam) {
+                param.result = true
+            }
+        })
+        blocked++
+        Log.i(TAG, "Reels instream ad gate forced to suppress: ${clazz.name}.${method.name}")
+    }
+    if (blocked == 0) {
+        Log.w(TAG, "Reels instream ad gate not resolved (candidates=${candidates.size})")
+    }
+}
+
+// Server classification values that mark a reel item as an ad.
+private val AD_CLASSIFICATION_VALUES = setOf("AD", "ADS_MIDCARD")
+
+// Debug-only: renderables whose model carries a classification outside the
+// blocklist (e.g. MIDCARD/PARADE/UGC) pass straight through the render block.
+// Logging each (renderable, classification) pair once per session maps which
+// classification the still-visible banner ads ride on.
+private val reelsNonAdClassificationSeen: MutableSet<String> =
+    Collections.synchronizedSet(HashSet())
+
+// Server-injected full-page Reels ads: the ad item arrives inline in the reels
+// feed response (and, for the client-vended variant, via the FbShorts
+// sponsored pool) and renders straight from the item list without any ad fetch
+// or story-pool insertion, so removal happens at the video-home data
+// controller: the single A0K(List) choke point both feed paths push through,
+// plus disabling the client-side insertion trigger and the sponsored pool fill.
+private fun installReelsAdListFilters(classLoader: ClassLoader, bridge: DexKitBridge) {
+    val classifier = resolveReelsAdClassifier(classLoader, bridge) ?: return
+    Log.i(TAG, "Reels ad classifier resolved: ${classifier.describe()}")
+
+    // 1. Data controller choke point: A0K(List<C76D>) — each wrapper's list
+    //    field holds the InterfaceC190979h4 items pushed into the pager's UI
+    //    collection. Filter ad items out of the nested lists.
+    runCatching {
+        bridge.findClass {
+            matcher {
+                usingStrings("VideoHomeDataControllerImpl.maybeInsertAds")
+            }
+        }.forEach { candidate ->
+            val clazz = runCatching { candidate.getInstance(classLoader) }.getOrNull() ?: return@forEach
+            clazz.declaredMethods.filter { method ->
+                !Modifier.isStatic(method.modifiers) &&
+                    method.returnType == java.lang.Boolean.TYPE &&
+                    method.parameterTypes.size == 1 &&
+                    List::class.java.isAssignableFrom(method.parameterTypes[0])
+            }.forEach { method ->
+                runCatching { hookReelsPagerListPush(method, classifier) }
+                    .onFailure { Log.w(TAG, "Failed to hook reels pager push ${clazz.name}.${method.name}", it) }
+            }
+        }
+    }.onFailure { Log.w(TAG, "Reels pager push resolution failed", it) }
+
+    // 2. Client-side ad insertion trigger ("maybeInsertAds"): void no-op.
+    hookVoidMethodsByString(classLoader, bridge, "VideoHomeDataControllerImpl.maybeInsertAds", "Reels client-side ad insertion disabled")
+
+    // 3. FbShorts sponsored pool fill ("after_model_added_to_pool"): void
+    //    no-op, so vended ads never enter the pool.
+    hookVoidMethodsByString(classLoader, bridge, "after_model_added_to_pool", "Reels sponsored pool fill disabled")
+
+    // 4. Async RTI ad fetches: block at the fetch builders.
+    installReelsRtiAdBlock(classLoader, bridge)
+
+    // 5. The video-home item collection snapshot read: filter ads out of the
+    //    collection itself, so every reader sees a sanitized list regardless
+    //    of how or when an ad entered it (defeats the cold-start race where
+    //    the reels CSR load lands before hook installation finishes).
+    installReelsCollectionFilter(classLoader, bridge, classifier)
+
+    // 6. The shorts viewer's own ad components: RTI ad data (whose fetch can
+    //    fire before hook installation and whose response lands later) is
+    //    rendered directly by dedicated components, bypassing the video-home
+    //    collection. Block them at render time.
+    installReelsViewerAdRenderBlock(classLoader, bridge, classifier)
+
+    // 7. Diagnostics: capture stack traces when an ad is classified or the
+    //    sponsored label renders, to expose any remaining delivery path.
+    installReelsAdClassificationProbe(classLoader, bridge, classifier)
+    installReelsSponsoredLabelProbe(classLoader, bridge, classifier)
+
+    reelsFullPassInstalled.set(true)
+}
+
+// The shorts viewer renders server-injected full-page ads through dedicated
+// ad components — the ad root component ("FbShortsAdsRootKComponent"), the
+// real-time-intent section ("FbShortsAdsRealTimeIntentComponent"), and a
+// sibling of the RTI section with no surviving string anchor (576: X.PWg) —
+// fed directly by the RTI ad data, not by the video-home collection. Worse,
+// some of these components carry no anchor strings at all, and every reels
+// page (organic or ad) is ultimately built by the shared page component
+// (576: X.Ad2), whose only ad marker is its ad-model-typed field. So besides
+// the string anchors, every renderable class declaring a render method AND
+// holding a field typed as the ad model interface is hooked: when such a
+// component instance carries an ad-classified model (or an item list made
+// only of ad items), its render is short-circuited to null, which Litho
+// treats as "render nothing".
+// The reels render block races the cold-start ad render (the full DexKit pass
+// needs seconds; the reels UI renders within the first second). The resolved
+// hook targets are therefore persisted (keyed by host and module version, like
+// the feed guard cache) and re-installed within ~100ms of Application.attach
+// on later launches. The hook registries are shared between the early cached
+// install and the full DexKit pass so nothing is hooked twice.
+private const val REELS_GUARD_CACHE_FILE = "fbar_reels_guard_cache.properties"
+
+// Value-based on purpose: reflection hands out fresh Method copies on every
+// lookup, so an identity-based set would let the early install re-hook the
+// same methods on every retry (Method.equals compares declaring class, name
+// and signature).
+private val reelsRenderHookedMethods: MutableSet<Method> =
+    Collections.synchronizedSet(HashSet())
+
+// Snapshots are cached by the host until invalidated, so memoize filtered
+// results by snapshot identity to keep the hot read path cheap. Shared across
+// the cached and DexKit installs.
+private val reelsSnapshotMemo = Collections.synchronizedMap(IdentityHashMap<Any, Any>())
+
+// Hook targets recorded while the full DexKit pass installs, persisted for the
+// next launch's early install. Renderables are plain class names (the hooked
+// method is always "render"); the pager push and snapshot hooks are
+// "class#method" specs.
+private val reelsGuardRenderableNames = Collections.synchronizedList(ArrayList<String>())
+
+// Shoppable-card components blocked unconditionally by string anchor; tracked
+// separately from the ad renderables so the cached early install can hook them
+// without needing the ad classifier.
+private val reelsShoppingRenderableNames = Collections.synchronizedList(ArrayList<String>())
+private val reelsGuardPagerPushSpecs = Collections.synchronizedList(ArrayList<String>())
+private val reelsGuardSnapshotSpecs = Collections.synchronizedList(ArrayList<String>())
+
+@Volatile
+private var reelsGuardModelInterfaceSpecs: List<String> = emptyList()
+
+@Volatile
+private var reelsGuardEnumClassName: String = ""
+
+private fun installReelsViewerAdRenderBlock(
+    classLoader: ClassLoader,
+    bridge: DexKitBridge,
+    classifier: ReelsAdClassifier
+) {
+    val anchors = listOf(
+        "FbShortsAdsRootKComponent" to "Reels viewer ad component blocked",
+        "FbShortsAdsRealTimeIntentComponent" to "Reels RTI ad component blocked"
+    )
+    for ((anchor, label) in anchors) {
+        runCatching {
+            bridge.findClass {
+                matcher {
+                    usingStrings(anchor)
+                }
+            }.forEach { candidate ->
+                val clazz = runCatching { candidate.getInstance(classLoader) }.getOrNull() ?: return@forEach
+                hookReelsAdRenderable(clazz, classifier, reelsRenderHookedMethods, label)
+            }
+        }.onFailure { Log.w(TAG, "$label failed", it) }
+    }
+
+    // Shoppable product cards (the small "Shop now" banner overlaying a reel):
+    // unlike the ad renderables above, these hold a shopping product payload,
+    // not an ad-classified model, so they are blocked unconditionally — the
+    // components exist solely to render the shopping card. The string anchors
+    // only bootstrap the discovery: their shared non-framework field type is
+    // the shopping payload class, and a structural pass then catches every
+    // renderable holding it (banner card, marketplace card, hscroll items...).
+    val shoppingAnchors = listOf(
+        "FbShortsShoppableProductItemComponent",
+        "FbShortsShoppableAdsItemComponent",
+        "FbShortsShoppableMarketplaceCardComponent"
+    )
+    val shoppingAnchorClasses = ArrayList<Class<*>>()
+    for (anchor in shoppingAnchors) {
+        runCatching {
+            bridge.findClass {
+                matcher {
+                    usingStrings(anchor)
+                }
+            }.forEach { candidate ->
+                val clazz = runCatching { candidate.getInstance(classLoader) }.getOrNull() ?: return@forEach
+                shoppingAnchorClasses.add(clazz)
+                hookReelsShoppingRenderable(clazz, reelsRenderHookedMethods, "Reels shopping card blocked")
+            }
+        }.onFailure { Log.w(TAG, "Reels shopping card block failed for $anchor", it) }
+    }
+    val shoppingPayloadType = resolveShoppingPayloadType(shoppingAnchorClasses)
+    if (shoppingPayloadType != null) {
+        runCatching {
+            val matches = bridge.findClass {
+                matcher {
+                    addFieldForType(shoppingPayloadType)
+                    addMethod { name("render") }
+                }
+            }
+            for (candidate in matches) {
+                val clazz = runCatching { candidate.getInstance(classLoader) }.getOrNull() ?: continue
+                hookReelsShoppingRenderable(clazz, reelsRenderHookedMethods, "Reels shopping card blocked (structural)")
+            }
+            Log.i(TAG, "Reels shopping renderables for ${shoppingPayloadType.name}: ${matches.size}")
+        }.onFailure { Log.w(TAG, "Reels shopping structural pass failed", it) }
+    } else {
+        Log.w(TAG, "Reels shopping payload type not resolved from ${shoppingAnchorClasses.size} anchors")
+    }
+
+    // Structural pass: renderables with an ad-model-typed field. This covers
+    // the ad components without string anchors and the shared page component.
+    for (modelInterface in classifier.modelInterfaceClasses) {
+        runCatching {
+            val matches = bridge.findClass {
+                matcher {
+                    addFieldForType(modelInterface)
+                    addMethod { name("render") }
+                }
+            }
+            for (candidate in matches) {
+                val clazz = runCatching { candidate.getInstance(classLoader) }.getOrNull() ?: continue
+                hookReelsAdRenderable(clazz, classifier, reelsRenderHookedMethods, "Reels ad renderable (structural)")
+            }
+            Log.i(TAG, "Reels structural renderables for ${modelInterface.name}: ${matches.size}")
+        }.onFailure { Log.w(TAG, "Reels structural renderable resolution failed for ${modelInterface.name}", it) }
+    }
+}
+
+private fun hookReelsAdRenderable(
+    clazz: Class<*>,
+    classifier: ReelsAdClassifier,
+    hookedRenderMethods: MutableSet<Method>,
+    label: String
+) {
+    val render = clazz.declaredMethods.firstOrNull {
+        it.name == "render" && !Modifier.isStatic(it.modifiers)
+    } ?: return
+    if (!hookedRenderMethods.add(render)) return
+    reelsGuardRenderableNames.add(clazz.name)
+    val modelFields = clazz.declaredFields.filter { field ->
+        !Modifier.isStatic(field.modifiers) && classifier.isModelType(field.type)
+    }.onEach { it.isAccessible = true }
+    val listFields = clazz.declaredFields.filter { field ->
+        !Modifier.isStatic(field.modifiers) &&
+            Iterable::class.java.isAssignableFrom(field.type)
+    }.onEach { it.isAccessible = true }
+    render.isAccessible = true
+    XposedBridge.hookMethod(render, object : XC_MethodHook() {
+        override fun beforeHookedMethod(param: MethodHookParam) {
+            val target = param.thisObject ?: return
+            for (field in modelFields) {
+                val model = runCatching { field.get(target) }.getOrNull() ?: continue
+                val classification = classifier.modelClassification(model)
+                if (classification in AD_CLASSIFICATION_VALUES) {
+                    param.result = null
+                    logHookHitThrottled(
+                        "reelsViewerAdRenderBlock",
+                        render,
+                        "model=${model.javaClass.simpleName}"
+                    )
+                    return
+                }
+                if (classification != null && BuildConfig.DEBUG) {
+                    val seenKey = "${clazz.name}=$classification"
+                    if (reelsNonAdClassificationSeen.add(seenKey)) {
+                        Log.i(
+                            TAG,
+                            "Reels renderable passthrough ${clazz.name} " +
+                                "model=${model.javaClass.simpleName} classification=$classification"
+                        )
+                    }
+                }
+            }
+            // Only block on an item list when every classifiable item in it is
+            // an ad — a mixed list belongs to a component that also renders
+            // organic reels and must not be blanked.
+            for (field in listFields) {
+                val items = runCatching { field.get(target) }.getOrNull() as? Iterable<*> ?: continue
+                var anyAd = false
+                var anyNonAd = false
+                for (item in items) {
+                    when (classifier.classificationOf(item)) {
+                        in AD_CLASSIFICATION_VALUES -> anyAd = true
+                        null -> {}
+                        else -> anyNonAd = true
+                    }
+                }
+                if (anyAd && !anyNonAd) {
+                    param.result = null
+                    logHookHitThrottled(
+                        "reelsViewerAdRenderBlock",
+                        render,
+                        "adList=${field.name}"
+                    )
+                    return
+                }
+            }
+        }
+    })
+    Log.i(
+        TAG,
+        "$label: ${clazz.name}.render modelFields=${modelFields.size} listFields=${listFields.size}"
+    )
+}
+
+// Derives the shoppable product payload class from the anchor components: the
+// non-framework field type shared by every anchored renderable (their product
+// payload holder). Anchors may individually lack the field, so any class that
+// shares the majority type wins.
+private fun resolveShoppingPayloadType(anchorClasses: List<Class<*>>): Class<*>? {
+    val counts = HashMap<Class<*>, Int>()
+    for (clazz in anchorClasses) {
+        clazz.declaredFields
+            .filter { !Modifier.isStatic(it.modifiers) }
+            .forEach { field ->
+                counts.merge(field.type, 1, Int::plus)
+            }
+    }
+    return counts.entries
+        .filter { (type, count) ->
+            count >= 2 && !type.name.startsWith("java.") && !type.isPrimitive
+        }
+        .maxByOrNull { it.value }?.key
+}
+
+// Unconditional render block for the shoppable product cards. Same shape as
+// hookReelsAdRenderable, but without the classifier check — every render of
+// these components is a shopping card. Shares the hooked-methods set so the
+// cached early install and the full pass never double-hook.
+private fun hookReelsShoppingRenderable(
+    clazz: Class<*>,
+    hookedRenderMethods: MutableSet<Method>,
+    label: String
+) {
+    val render = clazz.declaredMethods.firstOrNull {
+        it.name == "render" && !Modifier.isStatic(it.modifiers)
+    } ?: return
+    if (!hookedRenderMethods.add(render)) return
+    reelsShoppingRenderableNames.add(clazz.name)
+    render.isAccessible = true
+    XposedBridge.hookMethod(render, object : XC_MethodHook() {
+        override fun beforeHookedMethod(param: MethodHookParam) {
+            param.result = null
+            logHookHitThrottled("reelsShoppingCardBlock", render, "")
+        }
+    })
+    Log.i(TAG, "$label: ${clazz.name}.render")
+}
+
+// Marketplace sponsored units (seller row + "Sponsored" label + video card) in
+// the home feed are rendered by Litho components that carry stable "Marketplace
+// …Ads…" strings: the query-fetched fallback card ("MarketplaceVideoAdQuery"),
+// the Litho wrapper that mounts the ad card content
+// ("MarketplaceVideoAdsComponent"), and the ad video layout
+// ("MarketplaceVideoAdsGrootLayoutSpec"). Blocking their render/layout methods
+// to null makes Litho skip the whole unit. The ads themselves are fetched by a
+// Relay query whose name only exists in the JS bundle, so render time is the
+// earliest reliable native interception point.
+private val marketplaceAdRenderHookedMethods: MutableSet<Method> =
+    Collections.synchronizedSet(HashSet())
+
+private fun installMarketplaceAdRenderBlock(classLoader: ClassLoader, bridge: DexKitBridge) {
+    val anchors = listOf(
+        "MarketplaceVideoAdQuery",
+        "MarketplaceVideoAdsComponent",
+        "MarketplaceVideoAdsGrootLayoutSpec"
+    )
+    for (anchor in anchors) {
+        runCatching {
+            val matches = bridge.findClass {
+                matcher {
+                    usingStrings(anchor)
+                }
+            }
+            for (candidate in matches) {
+                val clazz = runCatching { candidate.getInstance(classLoader) }.getOrNull() ?: continue
+                hookMarketplaceAdRenderable(clazz, marketplaceAdRenderHookedMethods, "Marketplace ad component blocked")
+            }
+            Log.i(TAG, "Marketplace ad renderables for $anchor: ${matches.size}")
+        }.onFailure { Log.w(TAG, "Marketplace ad render block failed for $anchor", it) }
+    }
+}
+
+private fun hookMarketplaceAdRenderable(
+    clazz: Class<*>,
+    hookedMethods: MutableSet<Method>,
+    label: String
+) {
+    // The query-fetched card is a plain renderable (render(SectionContext));
+    // the other two are Litho layout components whose method names are
+    // obfuscated but whose shape is stable: exactly one non-primitive
+    // parameter (the Litho component context) and a non-primitive return
+    // (the component tree). Hooking that shape only matches the layout entry
+    // point — lifecycle hooks (onCreateLayout's 2-param variants, void
+    // attach/detach) are excluded.
+    val targets = clazz.declaredMethods.filter { method ->
+        !Modifier.isStatic(method.modifiers) && !method.isSynthetic && (
+            method.name == "render" ||
+                (
+                    method.parameterCount == 1 &&
+                        !method.parameterTypes[0].isPrimitive &&
+                        method.returnType != Void.TYPE &&
+                        !method.returnType.isPrimitive
+                    )
+            )
+    }
+    var hooked = 0
+    for (method in targets) {
+        if (!hookedMethods.add(method)) continue
+        method.isAccessible = true
+        XposedBridge.hookMethod(method, object : XC_MethodHook() {
+            override fun beforeHookedMethod(param: MethodHookParam) {
+                param.result = null
+                logHookHitThrottled("marketplaceAdRenderBlock", method, "")
+            }
+        })
+        hooked++
+    }
+    if (hooked > 0) {
+        Log.i(TAG, "$label: ${clazz.name} methods=$hooked")
+    }
+}
+
+// Marketplace home-feed sponsored tiles are fetched by dedicated Relay queries
+// ("RelayFBNetwork_MarketplaceHomeFeedAdsQueryRendererQuery",
+// "...MarketplaceHomeFeedAdsPaginationQuery",
+// "...MarketplaceHomeFeedBoostedListingAds[...Pagination]Query") issued
+// through the React Native Networking module. The query name is embedded in
+// the POST body, so requests carrying it are dropped entirely: the RN
+// QueryRenderer never receives data and keeps rendering its loading fallback
+// (nothing), which removes the whole sponsored tile. The Networking module is
+// found by its stable request-context string; its sendRequest method keeps the
+// RN-native name because JS invokes it reflectively by name.
+private fun installMarketplaceAdsQueryBlock(classLoader: ClassLoader, bridge: DexKitBridge) {
+    runCatching {
+        val matches = bridge.findClass {
+            matcher {
+                usingStrings("FBNetworkingModule_React_Native")
+            }
+        }
+        var installed = 0
+        for (candidate in matches) {
+            val clazz = runCatching { candidate.getInstance(classLoader) }.getOrNull() ?: continue
+            val sendRequest = clazz.declaredMethods.firstOrNull { method ->
+                method.name == "sendRequest" && method.parameterCount == 9
+            } ?: continue
+            if (hookMarketplaceSendRequest(sendRequest)) {
+                installed++
+                marketplaceNetResolvedClassName = clazz.name
+            }
+        }
+        Log.i(TAG, "Marketplace ads query block installed on $installed Networking module(s)")
+    }.onFailure { Log.w(TAG, "Marketplace ads query block failed", it) }
+}
+
+// Hooks already installed on these methods (the early cached install and the
+// full DexKit pass resolve the same method object; hooking twice would run the
+// rewrite/block logic twice per request).
+private val marketplaceSendRequestHookedMethods: MutableSet<Method> =
+    Collections.synchronizedSet(HashSet())
+
+// The Networking module class resolved by the last successful install; cached
+// so later launches can re-install the hook before the marketplace renderer
+// query fires (the cold-start race: the feed query goes out ~3s after launch,
+// before the DexKit scan finishes).
+@Volatile
+private var marketplaceNetResolvedClassName: String? = null
+
+private fun hookMarketplaceSendRequest(sendRequest: Method): Boolean {
+    if (!marketplaceSendRequestHookedMethods.add(sendRequest)) return false
+    sendRequest.isAccessible = true
+    XposedBridge.hookMethod(sendRequest, object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    val body = requestBodyOf(param.args.getOrNull(4)) ?: return
+                    val name = marketplaceQueryNameRegex.find(body)?.groupValues?.get(1)
+                        ?: marketplaceFormQueryIdRegex.find(body)?.groupValues?.get(1)
+                        ?: "persisted"
+                    if (BuildConfig.DEBUG) {
+                        val url = param.args.getOrNull(1) as? String ?: ""
+                        if (marketplaceDiagnosedQueries.add("req:$url|$name")) {
+                            Log.i(TAG, "RN request url=$url query=$name len=${body.length}")
+                        }
+                    }
+                    // The marketplace home feed queries (initial renderer and
+                    // scroll pagination) mix sponsored tiles into the organic
+                    // grid. The persisted-query config exposes server-honoured
+                    // skip flags, so rewriting the request variables makes the
+                    // server omit the ads entirely instead of trying to strip
+                    // them from a chunked incremental response.
+                    if (name == "MarketplaceHomeFeedQueryRendererQuery" ||
+                        name == "MarketplaceHomeFeedPaginationQuery"
+                    ) {
+                        val rewritten = rewriteMarketplaceFeedRequestVariables(body)
+                        if (rewritten != null) {
+                            val replacement = readableMapWithString(param.args.getOrNull(4), rewritten)
+                            if (replacement != null) {
+                                param.args[4] = replacement
+                                logHookHitThrottled("marketplaceFeedAdSkip", sendRequest, "")
+                            } else if (BuildConfig.DEBUG) {
+                                Log.w(TAG, "Could not build replacement ReadableMap for feed request")
+                            }
+                        }
+                        return
+                    }
+                    if (!body.contains("MarketplaceHomeFeedAds") &&
+                        !body.contains("MarketplaceHomeFeedBoostedListingAds") &&
+                        !body.contains("MarketplaceHomeFeedThemedAds")
+                    ) {
+                        return
+                    }
+                    param.result = null
+                    logHookHitThrottled("marketplaceAdsQueryBlock", sendRequest, "")
+                }
+    })
+    return true
+}
+
+// The marketplace feed query fires within seconds of launch — before the
+// DexKit scan installs the main hooks (the same cold-start race as the cached
+// News Feed) — so the resolved Networking module class name is persisted and
+// re-hooked right after Application.attach on later launches. The class name
+// is obfuscated per build, but it is discovered at runtime and cached keyed by
+// the Facebook version, never hardcoded.
+private const val MARKETPLACE_NET_CACHE_FILE = "fbar_marketplace_net_cache.properties"
+
+fun saveMarketplaceNetGuardCache(context: Context, hostVersionName: String) {
+    val className = marketplaceNetResolvedClassName ?: return
+    if (hostVersionName.isBlank()) return
+    runCatching {
+        val file = File(context.cacheDir, MARKETPLACE_NET_CACHE_FILE)
+        val properties = Properties()
+        properties.setProperty("version", hostVersionName)
+        properties.setProperty("moduleVersion", feedGuardCacheModuleKey())
+        properties.setProperty("networkingModule", className)
+        file.outputStream().use { properties.store(it, null) }
+        Log.i(TAG, "Saved marketplace net guard cache networkingModule=$className")
+    }.onFailure {
+        Log.w(TAG, "Failed to save marketplace net guard cache", it)
+    }
+}
+
+// Returns true when the cached Networking module was loaded and hooked. Fails
+// softly (false) while the secondary dex is not yet configured, so callers can
+// retry on a timer.
+fun installMarketplaceNetGuardFromCache(
+    context: Context,
+    classLoader: ClassLoader,
+    hostVersionName: String
+): Boolean {
+    if (hostVersionName.isBlank()) return false
+    return runCatching {
+        val file = File(context.cacheDir, MARKETPLACE_NET_CACHE_FILE)
+        if (!file.exists()) return false
+        val properties = Properties()
+        file.inputStream().use { properties.load(it) }
+        if (hostVersionName != properties.getProperty("version")) return false
+        if (feedGuardCacheModuleKey() != properties.getProperty("moduleVersion")) return false
+        val className = properties.getProperty("networkingModule").orEmpty()
+        if (className.isBlank()) return false
+        val clazz = Class.forName(className, false, classLoader)
+        val sendRequest = clazz.declaredMethods.firstOrNull { method ->
+            method.name == "sendRequest" && method.parameterCount == 9
+        } ?: return false
+        val hooked = hookMarketplaceSendRequest(sendRequest)
+        if (hooked) {
+            Log.i(TAG, "Marketplace net guard installed from cache on $className")
+        }
+        hooked
+    }.onFailure {
+        false
+    }.getOrDefault(false)
+}
+
+// The RN Networking module receives its POST body as a ReadableMap with a
+// "string" key. ReadableMap is a host interface, so read it reflectively.
+private fun requestBodyOf(data: Any?): String? {
+    if (data == null) return null
+    val hasKey = data.javaClass.methods.firstOrNull {
+        it.name == "hasKey" && it.parameterCount == 1
+    } ?: return null
+    val getString = data.javaClass.methods.firstOrNull {
+        it.name == "getString" && it.parameterCount == 1
+    } ?: return null
+    return runCatching {
+        if (hasKey.invoke(data, "string") != true) {
+            return@runCatching null
+        }
+        getString.invoke(data, "string") as? String
+    }.getOrNull()
+}
+
+// The marketplace home feed request body is form-encoded. Its "variables"
+// parameter is URL-encoded JSON whose schema (from the persisted query config
+// asset) includes server-honoured ad-skip flags. Flipping them to true makes
+// the server omit sponsored tiles from the response instead of the module
+// having to strip them out of a chunked incremental payload. Returns null when
+// the body has no variables to rewrite.
+private fun rewriteMarketplaceFeedRequestVariables(body: String): String? {
+    val marker = "variables="
+    val markerIndex = body.indexOf(marker)
+    if (markerIndex < 0) return null
+    val valueStart = markerIndex + marker.length
+    val valueEnd = body.indexOf('&', valueStart).let { if (it < 0) body.length else it }
+    val encoded = body.substring(valueStart, valueEnd)
+    val decoded = runCatching { URLDecoder.decode(encoded, "UTF-8") }.getOrNull() ?: return null
+    var changed = false
+    var variables: JSONObject? = null
+    try {
+        variables = JSONObject(decoded)
+        for (flag in MARKETPLACE_FEED_AD_SKIP_FLAGS) {
+            if (variables.optBoolean(flag, false)) continue
+            variables.put(flag, true)
+            changed = true
+        }
+    } catch (throwable: Throwable) {
+        if (BuildConfig.DEBUG) {
+            Log.w(TAG, "Failed to parse marketplace feed variables", throwable)
+        }
+        return null
+    }
+    if (!changed) return null
+    val rewritten = URLEncoder.encode(variables.toString(), "UTF-8")
+    return body.substring(0, valueStart) + rewritten + body.substring(valueEnd)
+}
+
+private val MARKETPLACE_FEED_AD_SKIP_FLAGS = listOf(
+    "shouldSkipAdRequest",
+    "shouldSkipBoostedListingAdRequest",
+)
+
+// Builds a replacement ReadableMap body for the RN Networking module. The
+// module and its same-origin delegate read the body only through
+// hasKey/getString/getType, so any ReadableMap implementation works; the RN
+// bridge's WritableNativeMap is public API with a no-arg constructor and
+// putString(String, String).
+private fun readableMapWithString(original: Any?, body: String): Any? {
+    if (original == null) return null
+    return runCatching {
+        // Resolve through the host classloader (the original body map's), not
+        // the module's own.
+        val mapClass = original.javaClass.classLoader
+            .loadClass("com.facebook.react.bridge.WritableNativeMap")
+        val instance = mapClass.getDeclaredConstructor().newInstance()
+        val putString = mapClass.methods.firstOrNull {
+            it.name == "putString" &&
+                it.parameterCount == 2 &&
+                it.parameterTypes[0] == String::class.java &&
+                it.parameterTypes[1] == String::class.java
+        } ?: return@runCatching null
+        putString.invoke(instance, "string", body)
+        instance
+    }.getOrNull()
+}
+
+// Correlates marketplace diagnostics across a session while diagnosing where
+// the marketplace feed payload actually flows.
+private val marketplaceDiagnosedQueries: MutableSet<String> =
+    Collections.synchronizedSet(HashSet())
+private val marketplaceQueryNameRegex = Regex("query[\\s]+([A-Za-z0-9_]+)")
+// Persisted Relay requests are form-encoded and carry the readable query
+// name in fb_api_req_friendly_name plus a numeric doc_id.
+private val marketplaceFormQueryIdRegex = Regex("fb_api_req_friendly_name=([A-Za-z0-9_]+)")
+
+// The RN Networking module hands every response body to JavaScript through the
+// static emitters of one class (found via its stable "didReceiveNetworkData"
+// event string): the text path, the base64/byte[] path, and the incremental
+// path. Feed responses are chunked through the incremental path, so reliably
+// rewriting the payload there requires reassembling chunks across calls.
+private fun installMarketplaceFeedResponseFilter(classLoader: ClassLoader, bridge: DexKitBridge) {
+    runCatching {
+        val matches = bridge.findClass {
+            matcher {
+                usingStrings("didReceiveNetworkData")
+            }
+        }
+        var installed = 0
+        for (candidate in matches) {
+            val clazz = runCatching { candidate.getInstance(classLoader) }.getOrNull() ?: continue
+            for (method in clazz.declaredMethods) {
+                if (!java.lang.reflect.Modifier.isStatic(method.modifiers)) continue
+                if (method.returnType != Void.TYPE) continue
+                val params = method.parameterTypes
+                val incrementalEmitter = params.size == 6 &&
+                    params[1] == String::class.java &&
+                    params[2] == String::class.java &&
+                    params[3] == Int::class.javaPrimitiveType &&
+                    params[4] == Long::class.javaPrimitiveType &&
+                    params[5] == Long::class.javaPrimitiveType
+                if (!incrementalEmitter) continue
+                method.isAccessible = true
+                XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        if (!BuildConfig.DEBUG) return
+                        val body = param.args.getOrNull(2) as? String ?: return
+                        if (!body.contains("ponsored")) return
+                        // Diagnostic capture: write sponsored-bearing chunks to
+                        // the host cache dir (logcat's ring buffer is too small
+                        // for ~120KB bodies).
+                        runCatching {
+                            val context = param.args.getOrNull(0) as? Context ?: return
+                            val dir = File(context.cacheDir, "mp_probe")
+                            dir.mkdirs()
+                            val file = File(dir, "chunk_${System.currentTimeMillis()}.json")
+                            file.writeText(body)
+                            Log.i(TAG, "MP-CHUNK captured len=${body.length} file=${file.name}")
+                        }
+                    }
+                })
+                installed++
+                Log.i(TAG, "Marketplace response probe installed on ${clazz.name}.$method")
+            }
+        }
+        Log.i(TAG, "Marketplace response probe installed on $installed emitter(s)")
+    }.onFailure { Log.w(TAG, "Marketplace response probe failed", it) }
+}
+
+// The video-home item collection (576: X.4zE) is read exclusively through a
+// static snapshot method that returns an ImmutableList copy of the current
+// items (with copy-on-write caching). Every consumer — the reels pager, the
+// adapter, the Litho sections — sees the collection through that snapshot, so
+// filtering it removes ad items from all views at once. This catches ads that
+// entered the collection through ANY path, including CSR loads that completed
+// before the module's hooks were installed (the cold-start race).
+private fun installReelsCollectionFilter(
+    classLoader: ClassLoader,
+    bridge: DexKitBridge,
+    classifier: ReelsAdClassifier
+) {
+    runCatching {
+        bridge.findClass {
+            matcher {
+                usingStrings("videohome_insert_index_out_of_bounds")
+            }
+        }.forEach { candidate ->
+            val clazz = runCatching { candidate.getInstance(classLoader) }.getOrNull() ?: return@forEach
+            val snapshotMethods = clazz.declaredMethods.filter { method ->
+                Modifier.isStatic(method.modifiers) &&
+                    List::class.java.isAssignableFrom(method.returnType) &&
+                    method.parameterTypes.size == 1 &&
+                    method.parameterTypes[0] == clazz
+            }
+            if (snapshotMethods.isEmpty()) {
+                Log.w(TAG, "Reels collection snapshot method not found on ${clazz.name}")
+                return@forEach
+            }
+            snapshotMethods.forEach { method ->
+                hookReelsCollectionSnapshot(method, classifier)
+            }
+        }
+    }.onFailure { Log.w(TAG, "Reels collection filter failed", it) }
+}
+
+private fun hookReelsCollectionSnapshot(method: Method, classifier: ReelsAdClassifier) {
+    method.isAccessible = true
+    reelsGuardSnapshotSpecs.add("${method.declaringClass.name}#${method.name}")
+    XposedBridge.hookMethod(method, object : XC_MethodHook() {
+        override fun afterHookedMethod(param: MethodHookParam) {
+            if (param.throwable != null) return
+            val snapshot = param.result as? List<*> ?: return
+            val cached = reelsSnapshotMemo[snapshot]
+            if (cached != null) {
+                param.result = cached
+                return
+            }
+            val kept = ArrayList<Any?>(snapshot.size)
+            var removed = 0
+            for (item in snapshot) {
+                val classification = classifier.classificationOf(item)
+                if (classification != null && classification in AD_CLASSIFICATION_VALUES) {
+                    removed++
+                } else {
+                    kept.add(item)
+                }
+            }
+            if (removed == 0) {
+                reelsSnapshotMemo[snapshot] = snapshot
+                return
+            }
+            val rebuilt = buildImmutableListLike(
+                snapshot,
+                kept,
+                method.declaringClass.classLoader
+            )
+            if (rebuilt != null) {
+                reelsSnapshotMemo[snapshot] = rebuilt
+                param.result = rebuilt
+                logHookHitThrottled(
+                    "reelsCollectionFilter",
+                    method,
+                    "size=${snapshot.size} filtered=$removed kept=${kept.size}"
+                )
+            }
+        }
+    })
+    Log.i(TAG, "Hooked Reels collection ad filter at ${method.declaringClass.name}.${method.name}")
+}
+
+private val reelsClassificationProbeHits = AtomicInteger(0)
+private val reelsSponsoredLabelHits = AtomicInteger(0)
+
+// Diagnostic probe: whenever a reel media model is classified as an ad, log
+// the classification plus the call stack. Ads that bypass every known
+// pipeline reveal themselves here — whoever renders or processes the ad item
+// has to read its classification.
+private fun installReelsAdClassificationProbe(
+    classLoader: ClassLoader,
+    bridge: DexKitBridge,
+    classifier: ReelsAdClassifier
+) {
+    runCatching {
+        bridge.findMethod {
+            matcher {
+                returnType = classifier.enumClassName
+                paramCount = 0
+            }
+        }.forEach { methodData ->
+            val method = runCatching { methodData.getMethodInstance(classLoader) }.getOrNull()
+                ?: return@forEach
+            if (Modifier.isStatic(method.modifiers) || method.declaringClass.isInterface) return@forEach
+            method.isAccessible = true
+            XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    if (param.throwable != null) return
+                    val value = param.result?.toString() ?: return
+                    if (value !in AD_CLASSIFICATION_VALUES) return
+                    val hits = reelsClassificationProbeHits.incrementAndGet()
+                    if (hits > 12) return
+                    val stack = Throwable().stackTrace.take(20)
+                        .joinToString(" <- ") { "${it.className}.${it.methodName}" }
+                    Log.i(
+                        TAG,
+                        "ReelsAdDiag classified=$value hits=$hits at " +
+                            "${method.declaringClass.name}.${method.name} stack=$stack"
+                    )
+                }
+            })
+        }
+    }.onFailure { Log.w(TAG, "Reels ad classification probe failed", it) }
+}
+
+// Diagnostic probe: the sponsored label component ("FbShortsAdsSponsoredLabel
+// Component") is constructed only for ad items, so its constructor is a
+// reliable render-time signal. Logs its ad model and the call stack.
+private fun installReelsSponsoredLabelProbe(
+    classLoader: ClassLoader,
+    bridge: DexKitBridge,
+    classifier: ReelsAdClassifier
+) {
+    runCatching {
+        bridge.findClass {
+            matcher {
+                usingStrings("FbShortsAdsSponsoredLabelComponent")
+            }
+        }.forEach { candidate ->
+            val clazz = runCatching { candidate.getInstance(classLoader) }.getOrNull() ?: return@forEach
+            clazz.declaredConstructors.forEach { ctor ->
+                runCatching {
+                    ctor.isAccessible = true
+                    XposedBridge.hookMethod(ctor, object : XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            val hits = reelsSponsoredLabelHits.incrementAndGet()
+                            if (hits > 6) return
+                            val argInfo = param.args.joinToString(",") { arg ->
+                                classifier.modelClassification(arg)?.let { cls ->
+                                    "${arg?.javaClass?.simpleName}=$cls"
+                                } ?: arg?.javaClass?.simpleName ?: "null"
+                            }
+                            val stack = Throwable().stackTrace.take(20)
+                                .joinToString(" <- ") { "${it.className}.${it.methodName}" }
+                            Log.i(TAG, "ReelsAdDiag sponsoredLabel hits=$hits args=[$argInfo] stack=$stack")
+                        }
+                    })
+                    Log.i(TAG, "Hooked Reels sponsored label ctor ${clazz.name}")
+                }
+            }
+        }
+    }.onFailure { Log.w(TAG, "Reels sponsored label probe failed", it) }
+}
+
+// Async RTI (real-time intent) Reels ads: while watching organic reels, the
+// viewer's FbShortsRealTimeIntentAdsDataController (576: X.50U) proactively
+// requests a fresh ad from the server ("async_ads_request_type" =
+// "IMMERSIVE_REAL_TIME_INTENT", plus the POE/post-roll interstitial variant)
+// and injects the response's AD-classified items into the pager as full-page
+// ads. These fetches run outside the gated instream pipeline entirely, so they
+// are blocked at their builders: the Function0.invoke() methods that assemble
+// the GraphQL request are no-op'd (their return value is discarded — they run
+// through a Runnable SAM), so the ad response never arrives. This also covers
+// the impRecord "INTERSTITIAL_N" ads, which come from the POE variant.
+private fun installReelsRtiAdBlock(classLoader: ClassLoader, bridge: DexKitBridge) {
+    val targets = listOf(
+        "IMMERSIVE_REAL_TIME_INTENT" to "Reels RTI ad fetch blocked",
+        "POE_TRIGGERED_INTERSTITIAL" to "Reels POE interstitial fetch blocked"
+    )
+    for ((needle, label) in targets) {
+        runCatching {
+            bridge.findMethod {
+                matcher {
+                    usingStrings(needle)
+                }
+            }.forEach { methodData ->
+                val method = runCatching { methodData.getMethodInstance(classLoader) }.getOrNull()
+                    ?: return@forEach
+                if (Modifier.isStatic(method.modifiers) || method.parameterCount != 0) return@forEach
+                method.isAccessible = true
+                XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        param.result = null
+                    }
+                })
+                Log.i(TAG, "$label: ${method.declaringClass.name}.${method.name}")
+            }
+        }.onFailure { Log.w(TAG, "$label resolution failed", it) }
+    }
+}
+
+private fun hookVoidMethodsByString(
+    classLoader: ClassLoader,
+    bridge: DexKitBridge,
+    usingString: String,
+    label: String
+) {
+    runCatching {
+        bridge.findMethod {
+            matcher {
+                usingStrings(usingString)
+            }
+        }.forEach { methodData ->
+            val method = runCatching { methodData.getMethodInstance(classLoader) }.getOrNull()
+                ?: return@forEach
+            if (Modifier.isStatic(method.modifiers) || method.returnType != Void.TYPE) return@forEach
+            method.isAccessible = true
+            XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    param.result = null
+                }
+            })
+            Log.i(TAG, "$label: ${method.declaringClass.name}.${method.name}")
+        }
+    }.onFailure { Log.w(TAG, "$label resolution failed", it) }
+}
+
+// Filters ad items out of the nested lists pushed into the reels pager. The
+// pager push takes a list of wrapper objects (576: C76D), each holding its own
+// item list in its only Iterable-typed field. Every invocation logs a
+// throttled summary (item/model/ad counts plus a classification sample) so a
+// path change or an unrecognized ad classification is visible in debug logs.
+private fun hookReelsPagerListPush(method: Method, classifier: ReelsAdClassifier) {
+    method.isAccessible = true
+    reelsGuardPagerPushSpecs.add("${method.declaringClass.name}#${method.name}")
+    XposedBridge.hookMethod(method, object : XC_MethodHook() {
+        override fun beforeHookedMethod(param: MethodHookParam) {
+            val wrappers = param.args.getOrNull(0) as? Iterable<*> ?: return
+            var total = 0
+            var withModel = 0
+            var removed = 0
+            var writeFailures = 0
+            val sample = ArrayList<String>(8)
+            val keptWrappers = ArrayList<Any?>()
+            for (wrapper in wrappers) {
+                val listField = resolveWrapperListField(wrapper?.javaClass)
+                val items = if (listField != null) {
+                    runCatching { listField.get(wrapper) }.getOrNull() as? Iterable<*>
+                } else null
+                if (items == null) {
+                    keptWrappers.add(wrapper)
+                    continue
+                }
+                val keptItems = ArrayList<Any?>()
+                var ads = 0
+                for (item in items) {
+                    total++
+                    val classification = classifier.classificationOf(item)
+                    if (classification != null) {
+                        withModel++
+                        if (sample.size < 8) sample.add("${item?.javaClass?.simpleName}=${classification}")
+                    }
+                    if (classification != null && classification in AD_CLASSIFICATION_VALUES) {
+                        ads++
+                    } else {
+                        keptItems.add(item)
+                    }
+                }
+                when {
+                    ads == 0 -> keptWrappers.add(wrapper)
+                    // Ad-only wrapper: drop it from the outer list outright —
+                    // rewriting param.args is guaranteed to take effect, even
+                    // when the reflective write to the wrapper's final list
+                    // field is rejected by the runtime.
+                    keptItems.isEmpty() -> removed += ads
+                    else -> {
+                        val rebuilt = buildImmutableListLike(
+                            items,
+                            keptItems,
+                            method.declaringClass.classLoader
+                        )
+                        val applied = rebuilt != null && runCatching {
+                            listField?.set(wrapper, rebuilt)
+                            true
+                        }.getOrDefault(false)
+                        if (applied) {
+                            removed += ads
+                        } else {
+                            writeFailures++
+                        }
+                        keptWrappers.add(wrapper)
+                    }
+                }
+            }
+            if (keptWrappers.size != wrappers.count()) {
+                // Never null out the argument: the hooked method declares its
+                // parameter as a Kotlin non-null List, so a null (or a failed
+                // rebuild) must leave the original list untouched — the
+                // downstream render block still suppresses the ad page.
+                val rebuilt = buildImmutableListLike(
+                    param.args[0],
+                    keptWrappers,
+                    method.declaringClass.classLoader
+                )
+                if (rebuilt != null) {
+                    param.args[0] = rebuilt
+                }
+            }
+            logHookHitThrottled(
+                "reelsPagerPush",
+                method,
+                "items=$total withModel=$withModel adsRemoved=$removed writeFailures=$writeFailures " +
+                    "droppedWrappers=${wrappers.count() - keptWrappers.size} sample=[${sample.joinToString(", ")}]"
+            )
+        }
+    })
+    Log.i(TAG, "Hooked Reels pager ad filter at ${method.declaringClass.name}.${method.name}")
+}
+
+private val wrapperListFieldCache = ConcurrentHashMap<Class<*>, Field?>()
+
+private fun resolveWrapperListField(clazz: Class<*>?): Field? {
+    if (clazz == null) return null
+    wrapperListFieldCache.get(clazz)?.let { return it }
+    val field = runCatching {
+        var current: Class<*>? = clazz
+        var found: Field? = null
+        while (current != null && current != Any::class.java && found == null) {
+            found = current.declaredFields.firstOrNull { candidate ->
+                !Modifier.isStatic(candidate.modifiers) &&
+                    Iterable::class.java.isAssignableFrom(candidate.type)
+            }
+            current = current.superclass
+        }
+        found?.isAccessible = true
+        found
+    }.getOrNull()
+    wrapperListFieldCache[clazz] = field
+    return field
+}
+
+// Classifier for server-injected full-page Reels ads. Reel items expose their
+// media model through a zero-arg accessor; the model implements an interface
+// (576: X.9AE) whose zero-arg classifier method (BQB) returns a classification
+// enum (576: X.7T7) with stable server values ("AD", "ADS_MIDCARD", "MIDCARD",
+// "PARADE", "UGC"). The enum is found via the stable "ADS_MIDCARD" string; the
+// item interfaces are interfaces declaring exactly one zero-arg method
+// returning that enum.
+private class ReelsAdClassifier(
+    private val modelInterfaces: List<Pair<Class<*>, Method>>,
+    private val adValues: Set<Any>
+) {
+    lateinit var enumClassName: String
+
+    val modelInterfaceClasses: List<Class<*>> get() = modelInterfaces.map { it.first }
+
+    // Item class -> candidate accessor chains (each chain is a sequence of
+    // zero-arg getters from item to model). Null entries are cached misses.
+    private val accessorChainsCache = ConcurrentHashMap<Class<*>, List<List<Method>>?>()
+
+    fun isAdReelItem(item: Any?): Boolean {
+        val classification = classificationOf(item) ?: return false
+        return classification in AD_CLASSIFICATION_VALUES
+    }
+
+    // Classification of a direct model object (e.g. a constructor arg), or
+    // null when the value is not a model instance.
+    fun modelClassification(model: Any?): String? {
+        if (model == null) return null
+        for ((iface, method) in modelInterfaces) {
+            if (iface.isInstance(model)) {
+                return runCatching { method.invoke(model)?.toString() }.getOrNull()
+            }
+        }
+        return null
+    }
+
+    // Returns the item's classification name (e.g. "AD", "UGC"), or null when
+    // no model accessor chain resolves for the item's class.
+    fun classificationOf(item: Any?): String? {
+        if (item == null) return null
+        val chains = resolveAccessorChains(item.javaClass) ?: return null
+        for (chain in chains) {
+            var current: Any? = item
+            for (accessor in chain) {
+                current = runCatching { accessor.invoke(current) }.getOrNull() ?: break
+            }
+            val model = current ?: continue
+            for ((iface, method) in modelInterfaces) {
+                if (!iface.isInstance(model)) continue
+                return runCatching { method.invoke(model)?.toString() }.getOrNull()
+            }
+        }
+        return null
+    }
+
+    private fun resolveAccessorChains(clazz: Class<*>): List<List<Method>>? {
+        accessorChainsCache.get(clazz)?.let { return it }
+        val chains = runCatching { findAccessorChains(clazz) }.getOrNull()
+        accessorChainsCache[clazz] = chains
+        return chains
+    }
+
+    // Direct accessors first (item method returning a model interface), then
+    // two-hop chains through a holder object (576 reels items expose the media
+    // model via item.A04().A00()-style getter pairs). Only one hop through
+    // non-trivial types; deeper nesting has not been seen.
+    private fun findAccessorChains(clazz: Class<*>): List<List<Method>>? {
+        val chains = ArrayList<List<Method>>()
+        zeroArgMethods(clazz).forEach { candidate ->
+            if (modelInterfaces.any { (iface, _) -> candidate.returnType == iface }) {
+                chains.add(listOf(candidate))
+            }
+        }
+        zeroArgMethods(clazz).forEach { candidate ->
+            val holder = candidate.returnType
+            if (holder == clazz || holder.isPrimitive || holder == Void.TYPE ||
+                holder == String::class.java ||
+                Collection::class.java.isAssignableFrom(holder) ||
+                holder.name.startsWith("java.")
+            ) return@forEach
+            zeroArgMethods(holder).forEach { nested ->
+                if (modelInterfaces.any { (iface, _) -> nested.returnType == iface }) {
+                    chains.add(listOf(candidate, nested))
+                }
+            }
+        }
+        return chains.ifEmpty { null }
+    }
+
+    private fun zeroArgMethods(clazz: Class<*>): List<Method> =
+        clazz.methods.filter { method ->
+            !Modifier.isStatic(method.modifiers) &&
+                method.parameterCount == 0 &&
+                method.returnType != Void.TYPE
+        }
+
+    fun isModelType(type: Class<*>): Boolean = modelInterfaces.any { it.first == type }
+
+    fun describe(): String {
+        return "models=${modelInterfaces.joinToString { "${it.first.name}.${it.second.name}" }} " +
+            "adValues=${adValues.joinToString { it.toString() }}"
+    }
+}
+
+private fun resolveReelsAdClassifier(classLoader: ClassLoader, bridge: DexKitBridge): ReelsAdClassifier? {
+    // 1. The classification enum via its stable server-value strings.
+    val enumClass = bridge.findClass {
+        matcher {
+            usingStrings("ADS_MIDCARD")
+        }
+    }.asSequence()
+        .mapNotNull { runCatching { it.getInstance(classLoader) }.getOrNull() }
+        .firstOrNull { it.isEnum } ?: run {
+        Log.w(TAG, "Reels ad classifier: classification enum not found")
+        return null
+    }
+    val adValues = enumClass.enumConstants
+        .filter { runCatching { it.toString() }.getOrNull() in AD_CLASSIFICATION_VALUES }
+        .toSet()
+    if (adValues.isEmpty()) {
+        Log.w(TAG, "Reels ad classifier: enum ${enumClass.name} has no ad constants")
+        return null
+    }
+
+    // 2. Model interfaces: interfaces declaring exactly one zero-arg method
+    //    returning the classification enum.
+    val modelInterfaces = bridge.findMethod {
+        matcher {
+            returnType = enumClass.name
+            paramCount = 0
+        }
+    }.asSequence()
+        .mapNotNull { methodData ->
+            runCatching { methodData.getMethodInstance(classLoader) }.getOrNull()
+        }
+        .map { it.declaringClass }
+        .filter { it.isInterface }
+        .distinct()
+        .mapNotNull { candidate ->
+            runCatching {
+                val methods = candidate.declaredMethods.filter { method ->
+                    method.parameterCount == 0 && method.returnType == enumClass
+                }
+                if (methods.size != 1) return@mapNotNull null
+                methods[0].isAccessible = true
+                candidate to methods[0]
+            }.getOrNull()
+        }
+        .toList()
+    if (modelInterfaces.isEmpty()) {
+        Log.w(TAG, "Reels ad classifier: model interfaces not found")
+        return null
+    }
+    return ReelsAdClassifier(modelInterfaces, adValues).also {
+        it.enumClassName = enumClass.name
+        reelsGuardModelInterfaceSpecs = modelInterfaces.map { (iface, method) ->
+            "${iface.name}#${method.name}"
+        }
+        reelsGuardEnumClassName = enumClass.name
+    }
+}
+
+// Persists the reels hook targets discovered by the full DexKit pass so the
+// next launch of the same Facebook build can install them right after
+// Application.attach — before the cold-start reels render that flashes an ad
+// and only disappears once the render block arms seconds later.
+fun saveReelsGuardCache(context: Context, hostVersionName: String) {
+    if (hostVersionName.isBlank()) return
+    val renderables = reelsGuardRenderableNames.toList().distinct()
+    val shoppingRenderables = reelsShoppingRenderableNames.toList().distinct()
+    val interfaces = reelsGuardModelInterfaceSpecs
+    if (renderables.isEmpty() || interfaces.isEmpty()) return
+    runCatching {
+        val properties = Properties()
+        properties.setProperty("version", hostVersionName)
+        properties.setProperty("moduleVersion", feedGuardCacheModuleKey())
+        properties.setProperty("modelInterfaces", interfaces.joinToString(","))
+        properties.setProperty("enumClass", reelsGuardEnumClassName)
+        properties.setProperty("renderables", renderables.joinToString(","))
+        properties.setProperty("shoppingRenderables", shoppingRenderables.joinToString(","))
+        properties.setProperty("pagerPush", reelsGuardPagerPushSpecs.toList().distinct().joinToString(","))
+        properties.setProperty("snapshots", reelsGuardSnapshotSpecs.toList().distinct().joinToString(","))
+        File(context.cacheDir, REELS_GUARD_CACHE_FILE).outputStream().use { properties.store(it, null) }
+        Log.i(TAG, "Saved reels guard cache renderables=${renderables.size} shopping=${shoppingRenderables.size} pagerPush=${reelsGuardPagerPushSpecs.size} snapshots=${reelsGuardSnapshotSpecs.size}")
+    }.onFailure { Log.w(TAG, "Failed to save reels guard cache", it) }
+}
+
+@Volatile
+private var reelsGuardCachedInterfaces: List<String> = emptyList()
+
+@Volatile
+private var reelsGuardCachedRenderables: List<String> = emptyList()
+
+@Volatile
+private var reelsGuardCachedShoppingRenderables: List<String> = emptyList()
+
+@Volatile
+private var reelsGuardCachedPagerPush: List<String> = emptyList()
+
+@Volatile
+private var reelsGuardCachedSnapshots: List<String> = emptyList()
+
+@Volatile
+private var reelsGuardCacheParsed = false
+
+// Cached specs already resolved by the early-install thread; each is retried
+// until its class becomes loadable, then never again.
+private val reelsGuardResolvedSpecs: MutableSet<String> = Collections.synchronizedSet(HashSet())
+
+// Set once the full DexKit pass installs the reels hooks; the early-install
+// thread stops retrying because every target is then hooked anyway.
+private val reelsFullPassInstalled = java.util.concurrent.atomic.AtomicBoolean(false)
+
+// Loads the persisted reels guard targets and installs them on a background
+// thread, retrying while the secondary dex finishes configuring (the cached
+// class names fail Class.forName at attach time, exactly like the feed guard).
+fun installReelsGuardFromCache(
+    context: Context,
+    classLoader: ClassLoader,
+    hostVersionName: String
+) {
+    if (hostVersionName.isBlank()) return
+    if (!reelsGuardCacheParsed) {
+        val parsed = runCatching {
+            val file = File(context.cacheDir, REELS_GUARD_CACHE_FILE)
+            if (!file.exists()) return
+            val properties = Properties()
+            file.inputStream().use { properties.load(it) }
+            if (hostVersionName != properties.getProperty("version")) {
+                Log.i(TAG, "Reels guard cache stale for version=$hostVersionName; re-discovering")
+                return
+            }
+            if (feedGuardCacheModuleKey() != properties.getProperty("moduleVersion")) {
+                Log.i(TAG, "Reels guard cache stale for moduleVersion; re-discovering")
+                return
+            }
+            reelsGuardCachedInterfaces = properties.getProperty("modelInterfaces").orEmpty()
+                .split(',').filter { it.isNotBlank() }
+            reelsGuardCachedRenderables = properties.getProperty("renderables").orEmpty()
+                .split(',').filter { it.isNotBlank() }
+            reelsGuardCachedShoppingRenderables = properties.getProperty("shoppingRenderables").orEmpty()
+                .split(',').filter { it.isNotBlank() }
+            reelsGuardCachedPagerPush = properties.getProperty("pagerPush").orEmpty()
+                .split(',').filter { it.isNotBlank() }
+            reelsGuardCachedSnapshots = properties.getProperty("snapshots").orEmpty()
+                .split(',').filter { it.isNotBlank() }
+            true
+        }.getOrDefault(false)
+        if (!parsed || reelsGuardCachedInterfaces.isEmpty() || reelsGuardCachedRenderables.isEmpty()) {
+            reelsGuardCacheParsed = true
+            return
+        }
+        Log.i(
+            TAG,
+            "Loaded reels guard cache renderables=${reelsGuardCachedRenderables.size} " +
+                "pagerPush=${reelsGuardCachedPagerPush.size} snapshots=${reelsGuardCachedSnapshots.size}"
+        )
+        reelsGuardCacheParsed = true
+    }
+    if (reelsGuardCachedInterfaces.isEmpty()) return
+    Thread(
+        {
+            // Some cached classes (e.g. the pager controller) only become
+            // loadable when the secondary dexes finish configuring, seconds
+            // after attach — hence the long retry window. Each spec is
+            // resolved at most once; the full DexKit pass makes the whole
+            // thread redundant once it installs.
+            val allSpecs = reelsGuardCachedRenderables +
+                reelsGuardCachedShoppingRenderables +
+                reelsGuardCachedPagerPush +
+                reelsGuardCachedSnapshots
+            for (attempt in 1..80) {
+                if (reelsFullPassInstalled.get()) return@Thread
+                // Shopping cards need no classifier, so they install first —
+                // even before the model interfaces become loadable.
+                for (name in reelsGuardCachedShoppingRenderables) {
+                    if (!reelsGuardResolvedSpecs.add(name)) continue
+                    val clazz = runCatching { Class.forName(name, false, classLoader) }.getOrNull()
+                    if (clazz == null) {
+                        reelsGuardResolvedSpecs.remove(name)
+                        continue
+                    }
+                    runCatching {
+                        hookReelsShoppingRenderable(clazz, reelsRenderHookedMethods, "Reels shopping card (cached)")
+                    }
+                }
+                val classifier = buildCachedReelsClassifier(classLoader)
+                if (classifier != null) {
+                    for (name in reelsGuardCachedRenderables) {
+                        if (!reelsGuardResolvedSpecs.add(name)) continue
+                        val clazz = runCatching { Class.forName(name, false, classLoader) }.getOrNull()
+                        if (clazz == null) {
+                            reelsGuardResolvedSpecs.remove(name)
+                            continue
+                        }
+                        runCatching {
+                            hookReelsAdRenderable(clazz, classifier, reelsRenderHookedMethods, "Reels ad renderable (cached)")
+                        }
+                    }
+                    for (spec in reelsGuardCachedPagerPush) {
+                        if (!reelsGuardResolvedSpecs.add(spec)) continue
+                        val method = resolveReelsGuardMethodSpec(classLoader, spec)
+                        if (method == null) {
+                            reelsGuardResolvedSpecs.remove(spec)
+                            continue
+                        }
+                        runCatching { hookReelsPagerListPush(method, classifier) }
+                    }
+                    for (spec in reelsGuardCachedSnapshots) {
+                        if (!reelsGuardResolvedSpecs.add(spec)) continue
+                        val method = resolveReelsGuardMethodSpec(classLoader, spec)
+                        if (method == null) {
+                            reelsGuardResolvedSpecs.remove(spec)
+                            continue
+                        }
+                        runCatching { hookReelsCollectionSnapshot(method, classifier) }
+                    }
+                }
+                if (reelsGuardResolvedSpecs.containsAll(allSpecs)) {
+                    Log.i(TAG, "Reels guard cache installed early: ${allSpecs.size} targets")
+                    return@Thread
+                }
+                Thread.sleep(250)
+            }
+            Log.w(TAG, "Reels guard cache install incomplete; full DexKit pass will finish it")
+        },
+        "FbarrReelsGuardInit"
+    ).start()
+}
+
+private fun buildCachedReelsClassifier(classLoader: ClassLoader): ReelsAdClassifier? {
+    val pairs = reelsGuardCachedInterfaces.mapNotNull { spec ->
+        val idx = spec.indexOf('#')
+        if (idx <= 0) return@mapNotNull null
+        runCatching {
+            val iface = Class.forName(spec.substring(0, idx), false, classLoader)
+            val method = iface.getDeclaredMethod(spec.substring(idx + 1))
+            method.isAccessible = true
+            iface to method
+        }.getOrNull()
+    }
+    if (pairs.size != reelsGuardCachedInterfaces.size) return null
+    return ReelsAdClassifier(pairs, emptySet()).also { it.enumClassName = reelsGuardEnumClassName }
+}
+
+private fun resolveReelsGuardMethodSpec(classLoader: ClassLoader, spec: String): Method? {
+    val idx = spec.indexOf('#')
+    if (idx <= 0) return null
+    return runCatching {
+        val clazz = Class.forName(spec.substring(0, idx), false, classLoader)
+        val method = clazz.getDeclaredMethod(spec.substring(idx + 1))
+        method.isAccessible = true
+        method
+    }.getOrNull()
+}
+
+// Pure log probes over the two candidate pipelines for full-page Reels ads:
+// the instream/postloop fetch state machine ("FBFetchReelsVideoAdsQuery") and
+// the reels ad impression recorder ("ReelsAdImpRecord"). Whichever fires while
+// a full-page ad is visible identifies the real insertion pipeline.
+private fun installReelsAdPipelineProbes(classLoader: ClassLoader, bridge: DexKitBridge) {
+    val userSessionClass = runCatching {
+        Class.forName("com.facebook.auth.usersession.FbUserSession", false, classLoader)
+    }.getOrNull()
+    val futureClass = runCatching {
+        Class.forName("com.google.common.util.concurrent.ListenableFuture", false, classLoader)
+    }.getOrNull()
+
+    // Impression recorder: constructed exactly when a reels ad is displayed.
+    runCatching {
+        bridge.findClass {
+            matcher {
+                usingStrings("ReelsAdImpRecord(sessionId=")
+            }
+        }.forEach { candidate ->
+            val clazz = runCatching { candidate.getInstance(classLoader) }.getOrNull() ?: return@forEach
+            clazz.declaredConstructors.forEach { constructor ->
+                constructor.isAccessible = true
+                XposedBridge.hookMethod(constructor, object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        val count = reelsAdDiagnosticsLogged.incrementAndGet()
+                        if (count > 80) return
+                        Log.i(
+                            TAG,
+                            "ReelsAdDiag impRecord ${clazz.name} args=${formatDiagArgs(param.args)}"
+                        )
+                    }
+                })
+            }
+            Log.i(TAG, "Hooked Reels ad impression recorder ${clazz.name}")
+        }
+    }.onFailure { Log.w(TAG, "Reels ad impression recorder not found", it) }
+
+    // Instream/postloop fetch pipeline classes.
+    runCatching {
+        bridge.findClass {
+            matcher {
+                usingStrings("FBFetchReelsVideoAdsQuery")
+            }
+        }.forEach { candidate ->
+            val clazz = runCatching { candidate.getInstance(classLoader) }.getOrNull() ?: return@forEach
+            var hooked = 0
+            (clazz.declaredMethods + clazz.methods).filter { method ->
+                !Modifier.isStatic(method.modifiers) && !method.isSynthetic && !method.isBridge
+            }.forEach { method ->
+                val isFetch = futureClass != null && method.returnType == futureClass
+                val isTrigger = userSessionClass != null &&
+                    method.returnType == Void.TYPE &&
+                    method.parameterTypes.firstOrNull() == userSessionClass
+                if (!isFetch && !isTrigger) return@forEach
+                method.isAccessible = true
+                XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        val count = reelsAdDiagnosticsLogged.incrementAndGet()
+                        if (count > 80) return
+                        Log.i(
+                            TAG,
+                            "ReelsAdDiag ${if (isFetch) "fetch" else "trigger"} " +
+                                "${clazz.name}.${method.name} args=${formatDiagArgs(param.args)}"
+                        )
+                    }
+                })
+                hooked++
+            }
+            Log.i(TAG, "Hooked $hooked Reels instream pipeline method(s) in ${clazz.name}")
+        }
+    }.onFailure { Log.w(TAG, "Reels instream pipeline classes not found", it) }
+}
+
+// Walks the component's fields to capture the reels item model (C8YG → A04
+// ad model C8Wm) and every reachable string field, so one reproduction shows
+// the full ad payload chain.
+private fun describeReelsAdModelChain(root: Any) {
+    runCatching {
+        val rootClass = root.javaClass
+        val fields = rootClass.declaredFields.filter { !Modifier.isStatic(it.modifiers) }
+        fields.forEach { field ->
+            field.isAccessible = true
+            val value = runCatching { field.get(root) }.getOrNull() ?: return@forEach
+            val typeName = value.javaClass.name
+            val description = when {
+                value is String -> "\"${value.take(160)}\""
+                value.javaClass.name.contains("FbUserSession") -> "userSession"
+                else -> {
+                    val inner = value.javaClass.declaredFields
+                        .filter { !Modifier.isStatic(it.modifiers) }
+                        .mapNotNull { innerField ->
+                            innerField.isAccessible = true
+                            val innerValue = runCatching { innerField.get(value) }.getOrNull()
+                            innerValue?.let { "  ${innerField.name}(${innerField.type.simpleName})=${formatDiagValue(it).take(120)}" }
+                        }
+                        .joinToString("\n")
+                    "$typeName {\n$inner\n}"
+                }
+            }
+            Log.i(TAG, "ReelsAdDiag field ${field.name}($typeName)=${description.take(600)}")
+        }
+    }.onFailure { Log.w(TAG, "ReelsAdDiag chain walk failed", it) }
 }
 
 private fun resolveSponsoredPoolAddMethod(classLoader: ClassLoader, sponsoredPoolClass: ClassData): Method? {
@@ -3030,13 +4711,23 @@ private fun hookLateFeedListSanitizer(
     return true
 }
 
-private fun hookStoryPoolAdd(method: Method, feedItemInspector: FeedItemInspector) {
+private fun hookStoryPoolAdd(
+    method: Method,
+    feedItemInspector: FeedItemInspector,
+    logAllowedItems: Boolean = false
+) {
     XposedBridge.hookMethod(method, object : XC_MethodHook() {
         override fun beforeHookedMethod(param: MethodHookParam) {
             val item = param.args.getOrNull(0)
             val blockReason = feedItemInspector.storyPoolBlockReason(item)
             if (blockReason == null) {
-                if (feedItemInspector.isSponsoredFeedItem(item)) {
+                if (logAllowedItems && item != null) {
+                    logHookHitThrottled(
+                        "shortsPoolAddAllowed",
+                        method,
+                        feedItemInspector.describe(item)
+                    )
+                } else if (feedItemInspector.isSponsoredFeedItem(item)) {
                     logHookHitThrottled("storyPoolBroadAllowed", method, feedItemInspector.describe(item))
                 }
                 return
@@ -5103,6 +6794,7 @@ private fun hookPlayableAdActivity(method: Method) {
 }
 
 private fun hookGlobalGameAdActivityLifecycleFallback() {
+    if (!gameAdActivityLifecycleHookInstalled.compareAndSet(false, true)) return
     val onResume = (Activity::class.java.declaredMethods + Activity::class.java.methods).firstOrNull { method ->
         method.name == "onResume" && method.parameterCount == 0
     }?.apply { isAccessible = true } ?: return
@@ -5512,6 +7204,20 @@ private fun shouldTraverseAudienceNetworkObject(value: Any, isRootActivity: Bool
         className.contains(".ads.")
 }
 
+// Framework-only view-level safety net (View.addView/setText/setContentDescription/
+// setVisibility, WebView, Activity.onResume). None of it needs DexKit, so it is
+// installed right after Application.attach — before any feed, reels, or
+// marketplace content mounts — closing the cold-start race in which the first
+// sponsored tiles render before the full DexKit pass finishes seconds later.
+// Both installers are idempotent, so the later DexKit-time invocation is a
+// no-op.
+fun installGlobalAdSurfaceFallbacksEarly() {
+    runCatching { hookGlobalGameAdSurfaceFallbacks() }
+        .onFailure { Log.w(TAG, "Failed early global ad surface fallbacks", it) }
+    runCatching { hookGlobalGameAdActivityLifecycleFallback() }
+        .onFailure { Log.w(TAG, "Failed early global ad activity lifecycle fallback", it) }
+}
+
 private fun hookGlobalGameAdSurfaceFallbacks() {
     if (!gameAdSurfaceHooksInstalled.compareAndSet(0, 1)) return
 
@@ -5599,6 +7305,14 @@ private fun hookGlobalGameAdSurfaceFallbacks() {
                         hideLikelyAdContainer(view, "explicit feed ad content description")
                         return
                     }
+                    // Litho ComponentHost overrides getContentDescription and can
+                    // return an aggregated/different value mid-mount, so match on
+                    // the value actually being set.
+                    val descArg = param.args.getOrNull(0) as? CharSequence
+                    if (isReelsShoppingStickerMarkerText(descArg ?: view.contentDescription)) {
+                        hideReelsShoppingSticker(view, "reels shopping sticker content description")
+                        return
+                    }
                     if (!ENABLE_FEED_UI_MARKER_FALLBACKS) return
                     if (isFeedAdMarkerText(view.contentDescription)) {
                         hideLikelyAdContainer(view, "feed ad content description")
@@ -5671,6 +7385,9 @@ private fun sweepGameAdSurface(view: View?, reason: String): Boolean {
     }
     if (ENABLE_FEED_UI_MARKER_FALLBACKS && isPotentialFeedReelCtaAdMarkerView(view)) {
         hidden = hideLikelyFeedReelCtaAdContainer(view, reason) || hidden
+    }
+    if (isReelsShoppingStickerMarkerText(view.contentDescription)) {
+        hidden = hideReelsShoppingSticker(view, reason) || hidden
     }
 
     val group = view as? ViewGroup ?: return hidden
@@ -6198,6 +7915,58 @@ private fun isFeedReelCtaAdMarkerText(value: CharSequence?): Boolean {
     return FEED_REEL_CTA_AD_MARKER_TOKENS.any { token -> normalized.contains(token) }
 }
 
+private fun isReelsShoppingStickerMarkerText(value: CharSequence?): Boolean {
+    if (value.isNullOrBlank()) return false
+    val normalized = value.toString().lowercase().trim()
+    if (!normalized.contains(" - ") || !normalized.contains(", ")) return false
+    return REELS_SHOPPING_STICKER_CTA_TOKENS.any { token -> normalized.endsWith(token) }
+}
+
+// Marketplace sponsored tiles are React Native content rendered from Relay
+// data, so view-level hiding cannot reclaim the grid cell (Yoga ignores
+// View.visibility) and a visibility guard against Yoga re-layouts causes an
+// ANR. The tiles ride the organic home feed queries, so the module instead
+// (1) blocks the dedicated ads fetches in the RN Networking module and
+// (2) flips the server-honoured ad-skip variables in the organic feed
+// requests — see installMarketplaceAdsQueryBlock.
+
+
+private fun hideReelsShoppingSticker(view: View, reason: String): Boolean {
+    // The sticker is a small self-contained pill (thumbnail + product title +
+    // CTA) mounted as one Litho ComponentHost, so hiding the host itself —
+    // instead of walking up to a full-card target — removes the whole pill
+    // without touching the surrounding reel surface.
+    var hidden = false
+    if (view.visibility != View.GONE) {
+        view.visibility = View.GONE
+        hidden = true
+    }
+    view.minimumHeight = 0
+    view.layoutParams?.let { params ->
+        params.height = 0
+        view.layoutParams = params
+        hidden = true
+    }
+    view.requestLayout()
+    if (hidden) {
+        Log.i(
+            TAG,
+            "Hid reels shopping sticker via $reason view=${view.javaClass.name} " +
+                "desc=${view.contentDescription?.toString()?.take(120)}"
+        )
+    }
+    // Litho can re-bind the same mount and restore visibility after layout;
+    // re-assert once the frame settles.
+    view.post {
+        if (view.visibility != View.GONE) {
+            view.visibility = View.GONE
+            view.requestLayout()
+        }
+    }
+    return hidden
+}
+
+
 private fun isLikelyBannerSized(view: View, root: View?): Boolean {
     val rootHeight = root?.height?.takeIf { it > 0 } ?: return view.height in 1..360
     val height = view.height
@@ -6719,17 +8488,33 @@ private fun filterAdItems(list: MutableList<Any?>, inspector: AdStoryInspector):
     return removed
 }
 
-private fun buildImmutableListLike(sample: Any?, items: List<Any?>): Any? {
+private fun buildImmutableListLike(
+    sample: Any?,
+    items: List<Any?>,
+    loaderHint: ClassLoader? = null
+): Any? {
     if (sample == null) return null
-    return runCatching {
-        val immutableListClass = Class.forName(
-            "com.google.common.collect.ImmutableList",
-            false,
-            sample.javaClass.classLoader
-        )
-        val copyOf = immutableListClass.getDeclaredMethod("copyOf", Iterable::class.java)
-        copyOf.invoke(null, items)
-    }.getOrNull()
+    // The sample's own classloader can be the bootstrap one (e.g. a
+    // java.util.Collections singleton list), which cannot see the host's
+    // Guava — hence the hint, plus a fallback on the first element.
+    val loaders = sequenceOf(
+        loaderHint,
+        sample.javaClass.classLoader,
+        items.firstOrNull { it != null }?.javaClass?.classLoader
+    ).filterNotNull().distinct()
+    for (loader in loaders) {
+        val rebuilt = runCatching {
+            val immutableListClass = Class.forName(
+                "com.google.common.collect.ImmutableList",
+                false,
+                loader
+            )
+            val copyOf = immutableListClass.getDeclaredMethod("copyOf", Iterable::class.java)
+            copyOf.invoke(null, items)
+        }.getOrNull()
+        if (rebuilt != null) return rebuilt
+    }
+    return null
 }
 
 private fun replaceFeedItemsInResult(param: XC_MethodHook.MethodHookParam, items: List<Any?>): Boolean {
