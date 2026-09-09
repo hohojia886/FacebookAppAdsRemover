@@ -863,7 +863,7 @@ internal fun resolveLithoRenderMethod(componentClass: Class<*>): Method? {
 
 internal fun resolveWrapperListField(clazz: Class<*>?): Field? {
     if (clazz == null) return null
-    wrapperListFieldCache.get(clazz)?.let { return it }
+    wrapperListFieldCache[clazz]?.let { return it.orElse(null) }
     val field = runCatching {
         var current: Class<*>? = clazz
         var found: Field? = null
@@ -877,7 +877,7 @@ internal fun resolveWrapperListField(clazz: Class<*>?): Field? {
         found?.isAccessible = true
         found
     }.getOrNull()
-    wrapperListFieldCache[clazz] = field
+    wrapperListFieldCache[clazz] = Optional.ofNullable(field)
     return field
 }
 

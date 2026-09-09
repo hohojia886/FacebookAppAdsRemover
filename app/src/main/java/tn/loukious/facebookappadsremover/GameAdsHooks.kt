@@ -3215,3 +3215,58 @@ internal fun extractPromiseId(payload: Any?): String? {
     return runCatching { getString.invoke(content, "promiseID") as? String }.getOrNull()
 }
 
+internal fun installGameAdsHooksPipeline(
+    classLoader: ClassLoader,
+    hooks: ResolvedHooks
+): Boolean {
+    var installedAny = false
+
+    hooks.gameAdRequestMethods.forEach { method ->
+        runCatching { hookGameAdRequest(method); installedAny = true }
+            .onFailure { Log.e(TAG, "Failed to hook game ad request ${method.declaringClass.name}.${method.name}", it) }
+    }
+
+    hooks.gameAdBridgePostMessageMethod?.let { method ->
+        gameAdBridgeEntryMethodsHooked.add(methodHookKey(method))
+        runCatching { hookGameAdBridge(method); installedAny = true }
+            .onFailure { Log.e(TAG, "Failed to hook game ad bridge ${method.declaringClass.name}.${method.name}", it) }
+    }
+
+    hooks.gameAdRequestMethods.firstOrNull()?.declaringClass?.let { bridgeClass ->
+        runCatching { hookGameAdResultMethods(bridgeClass); installedAny = true }
+            .onFailure { Log.e(TAG, "Failed to hook game ad result helpers ${bridgeClass.name}", it) }
+        runCatching { hookGameAdServiceDispatchMethods(bridgeClass); installedAny = true }
+            .onFailure { Log.e(TAG, "Failed to hook game ad service dispatch ${bridgeClass.name}", it) }
+    }
+
+    if (ENABLE_AUDIENCE_NETWORK_REWARD_FALLBACKS) {
+        runCatching { hookAudienceNetworkRewardFallbacks(classLoader); installedAny = true }
+            .onFailure { Log.e(TAG, "Failed to hook Audience Network reward fallbacks", it) }
+    } else {
+        Log.i(TAG, "Skipped Audience Network reward fallback hooks for compatibility mode")
+    }
+
+    runCatching { installGameAdJavascriptInterfaceBridgeHook(); installedAny = true }
+    runCatching { hookGameAdSystemDiagnostics(classLoader) }
+        .onFailure { Log.e(TAG, "Failed to hook game ad diagnostics", it) }
+
+    hooks.playableAdActivityOnCreate?.let { method ->
+        runCatching { hookPlayableAdActivity(method); installedAny = true }
+            .onFailure { Log.e(TAG, "Failed to hook playable ad activity ${method.declaringClass.name}.${method.name}", it) }
+    }
+
+    hooks.gameAdUiActivityMethods.forEach { method ->
+        runCatching { hookPlayableAdActivity(method); installedAny = true }
+            .onFailure { Log.e(TAG, "Failed to hook game ad activity ${method.declaringClass.name}.${method.name}", it) }
+    }
+
+    runCatching { hookGlobalGameAdActivityLifecycleFallback(); installedAny = true }
+        .onFailure { Log.e(TAG, "Failed to hook global game ad activity lifecycle fallback", it) }
+    runCatching { hookGameAdActivityLaunchFallbacks(); installedAny = true }
+        .onFailure { Log.e(TAG, "Failed to hook game ad launch fallbacks", it) }
+    runCatching { hookGlobalGameAdSurfaceFallbacks(); installedAny = true }
+        .onFailure { Log.e(TAG, "Failed to hook global game ad surface fallbacks", it) }
+
+    return installedAny
+}
+

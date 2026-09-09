@@ -572,8 +572,8 @@ internal class ReelsAdClassifier(
     val modelInterfaceClasses: List<Class<*>> get() = modelInterfaces.map { it.first }
 
     // Item class -> candidate accessor chains (each chain is a sequence of
-    // zero-arg getters from item to model). Null entries are cached misses.
-    private val accessorChainsCache = ConcurrentHashMap<Class<*>, List<List<Method>>?>()
+    // zero-arg getters from item to model). Empty entries are cached misses.
+    private val accessorChainsCache = ConcurrentHashMap<Class<*>, List<List<Method>>>()
 
     fun isAdReelItem(item: Any?): Boolean {
         val classification = classificationOf(item) ?: return false
@@ -596,7 +596,8 @@ internal class ReelsAdClassifier(
     // no model accessor chain resolves for the item's class.
     fun classificationOf(item: Any?): String? {
         if (item == null) return null
-        val chains = resolveAccessorChains(item.javaClass) ?: return null
+        val chains = resolveAccessorChains(item.javaClass)
+        if (chains.isEmpty()) return null
         for (chain in chains) {
             var current: Any? = item
             for (accessor in chain) {
@@ -611,9 +612,9 @@ internal class ReelsAdClassifier(
         return null
     }
 
-    private fun resolveAccessorChains(clazz: Class<*>): List<List<Method>>? {
-        accessorChainsCache.get(clazz)?.let { return it }
-        val chains = runCatching { findAccessorChains(clazz) }.getOrNull()
+    private fun resolveAccessorChains(clazz: Class<*>): List<List<Method>> {
+        accessorChainsCache[clazz]?.let { return it }
+        val chains = runCatching { findAccessorChains(clazz) }.getOrNull().orEmpty()
         accessorChainsCache[clazz] = chains
         return chains
     }

@@ -1393,3 +1393,63 @@ internal fun buildSponsoredEmptyResult(type: Class<*>): Any? {
     return constructor.newInstance(null, emptyReason)
 }
 
+internal fun installReelsStoryHooksPipeline(
+    classLoader: ClassLoader,
+    bridge: DexKitBridge,
+    hooks: ResolvedHooks,
+    feedItemInspector: FeedItemInspector
+): Boolean {
+    var installedAny = false
+
+    if (ENABLE_UPSTREAM_REELS_AD_HOOKS && hooks.adKindEnumClass != null && hooks.listBuilderAppendMethod != null) {
+        runCatching {
+            val inspector = AdStoryInspector(hooks.adKindEnumClass)
+            hookListBuilderAppend(hooks.listBuilderAppendMethod, inspector)
+            hooks.listBuilderFactoryMethod?.let { hookListResultFilter(it, "list factory", inspector) }
+            hooks.pluginPackBuildMethods.forEach { hookPluginPackFallback(it, inspector) }
+            installedAny = true
+        }.onFailure { Log.e(TAG, "Failed upstream reels ad hooks", it) }
+    } else if (ENABLE_UPSTREAM_REELS_AD_HOOKS) {
+        Log.w(TAG, "Upstream Reels targets unresolved; continuing with independent feed ad hooks")
+    } else {
+        Log.i(TAG, "Skipped upstream Reels list/plugin hooks to preserve feed Reels carousels")
+    }
+
+    hooks.instreamBannerEligibilityMethod?.let {
+        runCatching { hookInstreamBannerEligibility(it); installedAny = true }
+    }
+    hooks.indicatorPillAdEligibilityMethod?.let {
+        runCatching { hookIndicatorPillAdEligibility(it); installedAny = true }
+    }
+    hooks.reelsBannerRenderMethods.forEach { method ->
+        runCatching { hookReelsBannerRender(method); installedAny = true }
+            .onFailure { Log.e(TAG, "Failed to hook Reels banner render ${method.declaringClass.name}.${method.name}", it) }
+    }
+
+    runCatching { installReelsAdDiagnostics(classLoader, bridge) }
+        .onFailure { Log.w(TAG, "Failed to install Reels ad diagnostics", it) }
+
+    if (ENABLE_STORY_POOL_ADD_HOOKS) {
+        val shortsPoolClassNames = runCatching {
+            bridge.findClass {
+                matcher { usingStrings("FbShorts Pool") }
+            }.map { it.name }.toSet()
+        }.getOrDefault(emptySet())
+        Log.i(TAG, "Shorts pool classes for diagnostics: $shortsPoolClassNames")
+        hooks.storyPoolAddMethods.forEach { method ->
+            val logAllowed = method.declaringClass.name in shortsPoolClassNames
+            runCatching { hookStoryPoolAdd(method, feedItemInspector, logAllowed); installedAny = true }
+                .onFailure { Log.e(TAG, "Failed to hook story pool add ${method.declaringClass.name}.${method.name}", it) }
+        }
+    } else {
+        Log.i(TAG, "Skipped story pool add hooks to isolate feed Reels carousel loading")
+    }
+
+    hooks.storyAdProviders.forEach { provider ->
+        runCatching { hookStoryAdProvider(provider); installedAny = true }
+            .onFailure { Log.e(TAG, "Failed to hook story ad source ${provider.providerClass.name}", it) }
+    }
+
+    return installedAny
+}
+

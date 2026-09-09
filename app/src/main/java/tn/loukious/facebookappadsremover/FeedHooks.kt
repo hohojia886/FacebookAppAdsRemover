@@ -588,7 +588,7 @@ internal fun isVisibleAdTraceString(value: String): Boolean {
         normalized.contains("sign up")
 }
 
-internal val wrapperListFieldCache = ConcurrentHashMap<Class<*>, Field?>()
+internal val wrapperListFieldCache = ConcurrentHashMap<Class<*>, Optional<Field>>()
 
 internal fun hookListResultFilter(method: Method, source: String, inspector: AdStoryInspector) {
     XposedBridge.hookMethod(method, object : XC_MethodHook() {
@@ -1092,4 +1092,71 @@ internal fun logFeedItems(source: String, items: Iterable<*>, feedItemInspector:
         index++
     }
     Log.i(TAG, "FeedItem $source count=$index")
+}
+
+internal fun installFeedHooksPipeline(
+    classLoader: ClassLoader,
+    bridge: DexKitBridge,
+    hooks: ResolvedHooks,
+    feedItemInspector: FeedItemInspector
+): Boolean {
+    var installedAny = false
+    runCatching {
+        installFacebookVisibleAdTrace(classLoader)
+        discoverFeedComponentGuardCandidates(bridge, classLoader)
+        if (installFacebookFeedComponentGuard(classLoader)) {
+            installedAny = true
+        }
+    }.onFailure { Log.e(TAG, "Failed feed component guard / visible ad trace", it) }
+
+    if (ENABLE_FEED_CSR_FILTER_HOOKS) {
+        hooks.feedCsrFilterHooks.forEach { hook ->
+            runCatching {
+                hookFeedCsrFilterInput(hook, feedItemInspector)
+                installedAny = true
+            }.onFailure {
+                Log.e(TAG, "Failed to hook feed CSR filter ${hook.method.declaringClass.name}.${hook.method.name}", it)
+            }
+        }
+    } else {
+        Log.i(TAG, "Skipped feed CSR filter hooks to isolate feed Reels carousel loading")
+    }
+
+    if (ENABLE_LATE_FEED_LIST_HOOKS) {
+        hooks.lateFeedListHooks.forEach { hook ->
+            runCatching {
+                hookLateFeedListSanitizer(hook, feedItemInspector)
+                installedAny = true
+            }.onFailure {
+                Log.e(TAG, "Failed to hook late feed list ${hook.method.declaringClass.name}.${hook.method.name}", it)
+            }
+        }
+    } else {
+        Log.i(TAG, "Skipped late feed list hooks to isolate feed Reels carousel loading")
+    }
+
+    if (ENABLE_FEED_SPONSORED_POOL_HOOKS) {
+        hooks.sponsoredPoolAddMethod?.let {
+            runCatching { hookSponsoredPoolAdd(it); installedAny = true }
+        }
+        hooks.sponsoredStoryNextMethod?.let {
+            runCatching { hookSponsoredStoryNext(it); installedAny = true }
+        }
+        hooks.sponsoredPoolClass?.let {
+            runCatching {
+                hookSponsoredPoolListMethods(it)
+                hookSponsoredPoolResultMethods(it)
+                installedAny = true
+            }
+        }
+        hooks.sponsoredStoryManagerClass?.let {
+            runCatching {
+                hookSponsoredStoryListMethods(it)
+                installedAny = true
+            }
+        }
+    } else {
+        Log.i(TAG, "Skipped feed sponsored pool hooks to isolate feed Reels carousel loading")
+    }
+    return installedAny
 }
