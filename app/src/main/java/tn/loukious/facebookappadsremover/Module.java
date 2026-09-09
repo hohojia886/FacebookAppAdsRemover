@@ -73,7 +73,7 @@ public final class Module implements IXposedHookLoadPackage {
                 // The game webview can register its Javascript bridge before the
                 // DexKit scan installs the main hooks; watch for it immediately.
                 try {
-                    PatchesKt.installGameAdJavascriptInterfaceBridgeHook();
+                    GameAdsHooksKt.installGameAdJavascriptInterfaceBridgeHook();
                 } catch (Throwable throwable) {
                     debugLogError("Failed to install game bridge watcher", throwable);
                 }
@@ -81,7 +81,7 @@ public final class Module implements IXposedHookLoadPackage {
                 // hiding) must be active before the first feed/reels/marketplace
                 // content mounts, which happens well before the DexKit scan.
                 try {
-                    PatchesKt.installGlobalAdSurfaceFallbacksEarly();
+                    GameAdsHooksKt.installGlobalAdSurfaceFallbacksEarly();
                 } catch (Throwable throwable) {
                     debugLogError("Failed to install early ad surface fallbacks", throwable);
                 }
@@ -96,7 +96,7 @@ public final class Module implements IXposedHookLoadPackage {
     // is re-registered here (~100ms after attach) to hook before that render.
     private static void loadCachedFeedGuardCandidates(Application application) {
         try {
-            int registered = PatchesKt.loadCachedFeedGuardCandidates(
+            int registered = FeedHooksKt.loadCachedFeedGuardCandidates(
                     application,
                     application.getClassLoader(),
                     resolveHostVersionName(application)
@@ -131,7 +131,7 @@ public final class Module implements IXposedHookLoadPackage {
             return;
         }
         try {
-            PatchesKt.saveFeedGuardCandidateCache(application, resolveHostVersionName(application));
+            FeedHooksKt.saveFeedGuardCandidateCache(application, resolveHostVersionName(application));
         } catch (Throwable throwable) {
             debugLogError("Failed to save feed guard candidates", throwable);
         }
@@ -142,7 +142,7 @@ public final class Module implements IXposedHookLoadPackage {
     // resolved reels targets are re-installed from cache right after attach.
     private static void loadCachedReelsGuard(Application application) {
         try {
-            PatchesKt.installReelsGuardFromCache(
+            ReelsStoryHooksKt.installReelsGuardFromCache(
                     application,
                     application.getClassLoader(),
                     resolveHostVersionName(application)
@@ -158,7 +158,7 @@ public final class Module implements IXposedHookLoadPackage {
             return;
         }
         try {
-            PatchesKt.saveReelsGuardCache(application, resolveHostVersionName(application));
+            ReelsStoryHooksKt.saveReelsGuardCache(application, resolveHostVersionName(application));
         } catch (Throwable throwable) {
             debugLogError("Failed to save reels guard cache", throwable);
         }
@@ -171,7 +171,7 @@ public final class Module implements IXposedHookLoadPackage {
     // finishes configuring.
     private static void loadCachedMarketplaceNetGuard(Application application) {
         try {
-            if (PatchesKt.installMarketplaceNetGuardFromCache(
+            if (MarketplaceHooksKt.installMarketplaceNetGuardFromCache(
                     application,
                     application.getClassLoader(),
                     resolveHostVersionName(application)
@@ -193,7 +193,7 @@ public final class Module implements IXposedHookLoadPackage {
         }
         try {
             Application application = sApplication;
-            if (application != null && PatchesKt.installMarketplaceNetGuardFromCache(
+            if (application != null && MarketplaceHooksKt.installMarketplaceNetGuardFromCache(
                     application,
                     classLoader,
                     resolveHostVersionName(application)
@@ -214,7 +214,7 @@ public final class Module implements IXposedHookLoadPackage {
             return;
         }
         try {
-            PatchesKt.saveMarketplaceNetGuardCache(
+            MarketplaceHooksKt.saveMarketplaceNetGuardCache(
                     application,
                     resolveHostVersionName(application)
             );
@@ -303,8 +303,8 @@ public final class Module implements IXposedHookLoadPackage {
                 if (loadedClass == null) {
                     return;
                 }
-                String componentName = PatchesKt.lithoComponentNameOf(loadedClass);
-                if (componentName == null || !PatchesKt.registerFeedGuardCandidate(loadedClass, componentName)) {
+                String componentName = FeedHooksKt.lithoComponentNameOf(loadedClass);
+                if (componentName == null || !FeedHooksKt.registerFeedGuardCandidate(loadedClass, componentName)) {
                     return;
                 }
 
@@ -406,7 +406,7 @@ public final class Module implements IXposedHookLoadPackage {
             return;
         }
         try {
-            if (PatchesKt.installFacebookFeedComponentGuard(classLoader)) {
+            if (FeedHooksKt.installFacebookFeedComponentGuard(classLoader)) {
                 sFeedComponentGuardInstalled.set(true);
                 debugLogInfo(
                         "Sponsored feed component guard installed at " + readinessSource
