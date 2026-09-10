@@ -1,21 +1,23 @@
-# Add project specific ProGuard rules here.
-# You can control the set of applied configuration files using the
-# proguardFiles setting in build.gradle.
-#
-# For more details, see
-#   http://developer.android.com/guide/developing/tools/proguard.html
+# Facebook App Ads Remover ProGuard / R8 Keep Rules
 
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
+# Opt 4.2: Preserve essential Xposed entry points so Xposed framework can reflectively instantiate the module
+-keep class tn.loukious.facebookappadsremover.Module {
+    public *;
+}
+-keep class * implements de.robv.android.xposed.IXposedHookLoadPackage {
+    public *;
+}
+-keep class * implements de.robv.android.xposed.IXposedHookInitPackageResources {
+    public *;
+}
 
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
+# Preserve DexKit required JNI classes and native method contracts
+-keep class org.luckypray.dexkit.** {
+    public protected *;
+}
+-keepclasseswithmembernames class * {
+    native <methods>;
+}
 
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
+# Allow R8 access modification for maximum dead-code elimination and method inlining in release builds
+-allowaccessmodification

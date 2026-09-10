@@ -774,25 +774,45 @@ internal fun hookReelsPagerListPush(method: Method, classifier: ReelsAdClassifie
 // next launch of the same Facebook build can install them right after
 // Application.attach — before the cold-start reels render that flashes an ad
 // and only disappears once the render block arms seconds later.
+@Volatile
+private var lastSavedReelsGuardCachePayload: String? = null
+
+// Opt 3.1 & 3.2: Asynchronous background cache serialization and redundant write suppression
 fun saveReelsGuardCache(context: Context, hostVersionName: String) {
     if (hostVersionName.isBlank()) return
     val renderables = reelsGuardRenderableNames.toList().distinct()
     val shoppingRenderables = reelsShoppingRenderableNames.toList().distinct()
     val interfaces = reelsGuardModelInterfaceSpecs
     if (renderables.isEmpty() || interfaces.isEmpty()) return
-    runCatching {
-        val properties = Properties()
-        properties.setProperty("version", hostVersionName)
-        properties.setProperty("moduleVersion", feedGuardCacheModuleKey())
-        properties.setProperty("modelInterfaces", interfaces.joinToString(","))
-        properties.setProperty("enumClass", reelsGuardEnumClassName)
-        properties.setProperty("renderables", renderables.joinToString(","))
-        properties.setProperty("shoppingRenderables", shoppingRenderables.joinToString(","))
-        properties.setProperty("pagerPush", reelsGuardPagerPushSpecs.toList().distinct().joinToString(","))
-        properties.setProperty("snapshots", reelsGuardSnapshotSpecs.toList().distinct().joinToString(","))
-        File(context.cacheDir, REELS_GUARD_CACHE_FILE).outputStream().use { properties.store(it, null) }
-        Log.i(TAG, "Saved reels guard cache renderables=${renderables.size} shopping=${shoppingRenderables.size} pagerPush=${reelsGuardPagerPushSpecs.size} snapshots=${reelsGuardSnapshotSpecs.size}")
-    }.onFailure { Log.w(TAG, "Failed to save reels guard cache", it) }
+
+    val enumClass = reelsGuardEnumClassName
+    val pagerPush = reelsGuardPagerPushSpecs.toList().distinct()
+    val snapshots = reelsGuardSnapshotSpecs.toList().distinct()
+
+    val payload = "$hostVersionName|${feedGuardCacheModuleKey()}|${interfaces.joinToString(",")}|$enumClass|" +
+        "${renderables.joinToString(",")}|${shoppingRenderables.joinToString(",")}|${pagerPush.joinToString(",")}|${snapshots.joinToString(",")}"
+
+    if (payload == lastSavedReelsGuardCachePayload) {
+        if (BuildConfig.DEBUG) Log.i(TAG, "Reels guard cache payload unchanged; suppressing write")
+        return
+    }
+
+    cacheIoExecutor.execute {
+        runCatching {
+            val properties = Properties()
+            properties.setProperty("version", hostVersionName)
+            properties.setProperty("moduleVersion", feedGuardCacheModuleKey())
+            properties.setProperty("modelInterfaces", interfaces.joinToString(","))
+            properties.setProperty("enumClass", enumClass)
+            properties.setProperty("renderables", renderables.joinToString(","))
+            properties.setProperty("shoppingRenderables", shoppingRenderables.joinToString(","))
+            properties.setProperty("pagerPush", pagerPush.joinToString(","))
+            properties.setProperty("snapshots", snapshots.joinToString(","))
+            File(context.cacheDir, REELS_GUARD_CACHE_FILE).outputStream().use { properties.store(it, null) }
+            lastSavedReelsGuardCachePayload = payload
+            Log.i(TAG, "Saved reels guard cache renderables=${renderables.size} shopping=${shoppingRenderables.size} pagerPush=${reelsGuardPagerPushSpecs.size} snapshots=${reelsGuardSnapshotSpecs.size}")
+        }.onFailure { Log.w(TAG, "Failed to save reels guard cache", it) }
+    }
 }
 
 // Cached specs already resolved by the early-install thread; each is retried
@@ -836,6 +856,8 @@ fun installReelsGuardFromCache(
                 .split(',').filter { it.isNotBlank() }
             reelsGuardCachedSnapshots = properties.getProperty("snapshots").orEmpty()
                 .split(',').filter { it.isNotBlank() }
+            lastSavedReelsGuardCachePayload = "$hostVersionName|${feedGuardCacheModuleKey()}|${reelsGuardCachedInterfaces.joinToString(",")}|${properties.getProperty("enumClass").orEmpty()}|" +
+                "${reelsGuardCachedRenderables.joinToString(",")}|${reelsGuardCachedShoppingRenderables.joinToString(",")}|${reelsGuardCachedPagerPush.joinToString(",")}|${reelsGuardCachedSnapshots.joinToString(",")}"
             true
         }.getOrDefault(false)
         if (!parsed || reelsGuardCachedInterfaces.isEmpty() || reelsGuardCachedRenderables.isEmpty()) {

@@ -209,19 +209,33 @@ internal fun hookMarketplaceSendRequest(sendRequest: Method): Boolean {
     return true
 }
 
+@Volatile
+private var lastSavedMarketplaceNetCachePayload: String? = null
+
+// Opt 3.1 & 3.2: Asynchronous background cache serialization and redundant write suppression
 fun saveMarketplaceNetGuardCache(context: Context, hostVersionName: String) {
     val className = marketplaceNetResolvedClassName ?: return
     if (hostVersionName.isBlank()) return
-    runCatching {
-        val file = File(context.cacheDir, MARKETPLACE_NET_CACHE_FILE)
-        val properties = Properties()
-        properties.setProperty("version", hostVersionName)
-        properties.setProperty("moduleVersion", feedGuardCacheModuleKey())
-        properties.setProperty("networkingModule", className)
-        file.outputStream().use { properties.store(it, null) }
-        Log.i(TAG, "Saved marketplace net guard cache networkingModule=$className")
-    }.onFailure {
-        Log.w(TAG, "Failed to save marketplace net guard cache", it)
+
+    val payload = "$hostVersionName|${feedGuardCacheModuleKey()}|$className"
+    if (payload == lastSavedMarketplaceNetCachePayload) {
+        if (BuildConfig.DEBUG) Log.i(TAG, "Marketplace net guard cache payload unchanged; suppressing write")
+        return
+    }
+
+    cacheIoExecutor.execute {
+        runCatching {
+            val file = File(context.cacheDir, MARKETPLACE_NET_CACHE_FILE)
+            val properties = Properties()
+            properties.setProperty("version", hostVersionName)
+            properties.setProperty("moduleVersion", feedGuardCacheModuleKey())
+            properties.setProperty("networkingModule", className)
+            file.outputStream().use { properties.store(it, null) }
+            lastSavedMarketplaceNetCachePayload = payload
+            Log.i(TAG, "Saved marketplace net guard cache networkingModule=$className")
+        }.onFailure {
+            Log.w(TAG, "Failed to save marketplace net guard cache", it)
+        }
     }
 }
 
@@ -243,6 +257,7 @@ fun installMarketplaceNetGuardFromCache(
         if (feedGuardCacheModuleKey() != properties.getProperty("moduleVersion")) return false
         val className = properties.getProperty("networkingModule").orEmpty()
         if (className.isBlank()) return false
+        lastSavedMarketplaceNetCachePayload = "$hostVersionName|${feedGuardCacheModuleKey()}|$className"
         val clazz = Class.forName(className, false, classLoader)
         val sendRequest = clazz.declaredMethods.firstOrNull { method ->
             method.name == "sendRequest" && method.parameterCount == 9

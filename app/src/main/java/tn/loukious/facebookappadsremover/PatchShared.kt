@@ -39,11 +39,23 @@ import java.util.LinkedHashMap
 import java.util.Optional
 import java.util.WeakHashMap
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
 const val TAG = "FacebookAppAdsRemover"
+
+// Opt 3.1: Single-thread background executor for non-blocking asynchronous cache serialization
+internal val cacheIoExecutor: ExecutorService by lazy {
+    Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "FacebookAdsRemover-CacheIO").apply {
+            isDaemon = true
+            priority = Thread.MIN_PRIORITY
+        }
+    }
+}
 
 internal const val HOST_PACKAGE = "com.facebook.katana"
 internal const val BEFORE_SIZE_EXTRA = "facebook_ads_before_size"
@@ -326,23 +338,24 @@ internal val REELS_AD_SIGNAL_TOKENS = listOf(
     "banner_ad_"
 )
 
+// Opt 4.1: Inline small stateless log utility functions
 internal object Log {
-    fun i(tag: String, msg: String): Int = if (BuildConfig.DEBUG) AndroidLog.i(tag, msg) else 0
+    inline fun i(tag: String, msg: String): Int = if (BuildConfig.DEBUG) AndroidLog.i(tag, msg) else 0
 
-    fun w(tag: String, msg: String): Int = if (BuildConfig.DEBUG) AndroidLog.w(tag, msg) else 0
+    inline fun w(tag: String, msg: String): Int = if (BuildConfig.DEBUG) AndroidLog.w(tag, msg) else 0
 
-    fun w(tag: String, msg: String, throwable: Throwable): Int =
+    inline fun w(tag: String, msg: String, throwable: Throwable): Int =
         if (BuildConfig.DEBUG) AndroidLog.w(tag, msg, throwable) else 0
 
-    fun e(tag: String, msg: String): Int = if (BuildConfig.DEBUG) AndroidLog.e(tag, msg) else 0
+    inline fun e(tag: String, msg: String): Int = if (BuildConfig.DEBUG) AndroidLog.e(tag, msg) else 0
 
-    fun e(tag: String, msg: String, throwable: Throwable): Int =
+    inline fun e(tag: String, msg: String, throwable: Throwable): Int =
         if (BuildConfig.DEBUG) AndroidLog.e(tag, msg, throwable) else 0
 
-    fun missing(tag: String, hookName: String): Int =
+    inline fun missing(tag: String, hookName: String): Int =
         AndroidLog.w(tag, "Hook target not found: $hookName")
 
-    fun resolutionFailure(tag: String, msg: String, throwable: Throwable): Int {
+    inline fun resolutionFailure(tag: String, msg: String, throwable: Throwable): Int {
         return if (BuildConfig.DEBUG || throwable.message?.contains("Unable to resolve") == true) {
             AndroidLog.e(tag, msg, throwable)
         } else {
@@ -500,7 +513,8 @@ internal fun allMethodsInHierarchy(type: Class<*>): List<Method> {
 }
 
 
-internal fun isFeedListType(type: Class<*>): Boolean {
+// Opt 4.1: Inline stateless type helper functions
+internal inline fun isFeedListType(type: Class<*>): Boolean {
     return Iterable::class.java.isAssignableFrom(type) ||
         type.name == "com.google.common.collect.ImmutableList"
 }
@@ -508,7 +522,7 @@ internal fun isFeedListType(type: Class<*>): Boolean {
 // Narrower than isFeedListType: only concrete collection types, never arbitrary
 // interfaces that happen to extend Iterable. Used where the shape rule alone is
 // too generic to safely identify a method (see deferredUpdateMethod).
-internal fun isConcreteFeedListType(type: Class<*>): Boolean {
+internal inline fun isConcreteFeedListType(type: Class<*>): Boolean {
     return Collection::class.java.isAssignableFrom(type)
 }
 
@@ -713,19 +727,20 @@ internal fun logHookHitThrottled(hookName: String, method: Method, detail: Strin
     }
 }
 
-internal fun methodSignature(method: Method): String {
+// Opt 4.1: Inline stateless string formatting utility functions
+internal inline fun methodSignature(method: Method): String {
     return "${method.declaringClass.name}.${method.name}(${method.parameterTypes.joinToString(",") { it.name }}):${method.returnType.name}"
 }
 
-internal fun shortObjectLabel(value: Any): String {
+internal inline fun shortObjectLabel(value: Any): String {
     return "${value.javaClass.name}@${Integer.toHexString(System.identityHashCode(value))}"
 }
 
-internal fun byteArrayHexPreview(value: ByteArray): String {
+internal inline fun byteArrayHexPreview(value: ByteArray): String {
     return value.take(48).joinToString(" ") { byte -> "%02x".format(byte.toInt() and 0xff) }
 }
 
-internal fun byteArrayAsciiPreview(value: ByteArray): String {
+internal inline fun byteArrayAsciiPreview(value: ByteArray): String {
     return value.take(96).joinToString("") { byte ->
         val code = byte.toInt() and 0xff
         if (code in 32..126) code.toChar().toString() else "."

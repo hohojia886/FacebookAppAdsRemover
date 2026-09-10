@@ -301,6 +301,7 @@ fun loadCachedFeedGuardCandidates(
             .split(',').filter { it.isNotBlank() }
         val registered = registerCachedGuardClasses(classLoader, feedGuardCachedComponentNames, feedComponentCandidates) +
             registerCachedGuardClasses(classLoader, feedGuardCachedWrapperNames, feedWrapperCandidates)
+        lastSavedFeedGuardCachePayload = "$hostVersionName|${feedGuardCacheModuleKey()}|${feedGuardCachedComponentNames.joinToString(",")}|${feedGuardCachedWrapperNames.joinToString(",")}"
         Log.i(
             TAG,
             "Loaded feed guard cache components=$feedGuardCachedComponentNames " +
@@ -312,22 +313,36 @@ fun loadCachedFeedGuardCandidates(
     }.getOrDefault(0)
 }
 
+@Volatile
+private var lastSavedFeedGuardCachePayload: String? = null
+
+// Opt 3.1 & 3.2: Asynchronous background cache serialization and redundant write suppression
 fun saveFeedGuardCandidateCache(context: Context, hostVersionName: String) {
     if (hostVersionName.isBlank()) return
     val components = feedGuardResolvedComponentNames.toList()
     val wrappers = feedGuardResolvedWrapperNames.toList()
     if (components.isEmpty() || wrappers.isEmpty()) return
-    runCatching {
-        val file = File(context.cacheDir, FEED_GUARD_CACHE_FILE)
-        val properties = Properties()
-        properties.setProperty("version", hostVersionName)
-        properties.setProperty("moduleVersion", feedGuardCacheModuleKey())
-        properties.setProperty("components", components.joinToString(","))
-        properties.setProperty("wrappers", wrappers.joinToString(","))
-        file.outputStream().use { properties.store(it, null) }
-        Log.i(TAG, "Saved feed guard cache components=$components wrappers=$wrappers")
-    }.onFailure {
-        Log.w(TAG, "Failed to save feed guard cache", it)
+
+    val payload = "$hostVersionName|${feedGuardCacheModuleKey()}|${components.joinToString(",")}|${wrappers.joinToString(",")}"
+    if (payload == lastSavedFeedGuardCachePayload) {
+        if (BuildConfig.DEBUG) Log.i(TAG, "Feed guard cache payload unchanged; suppressing write")
+        return
+    }
+
+    cacheIoExecutor.execute {
+        runCatching {
+            val file = File(context.cacheDir, FEED_GUARD_CACHE_FILE)
+            val properties = Properties()
+            properties.setProperty("version", hostVersionName)
+            properties.setProperty("moduleVersion", feedGuardCacheModuleKey())
+            properties.setProperty("components", components.joinToString(","))
+            properties.setProperty("wrappers", wrappers.joinToString(","))
+            file.outputStream().use { properties.store(it, null) }
+            lastSavedFeedGuardCachePayload = payload
+            Log.i(TAG, "Saved feed guard cache components=$components wrappers=$wrappers")
+        }.onFailure {
+            Log.w(TAG, "Failed to save feed guard cache", it)
+        }
     }
 }
 
