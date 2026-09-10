@@ -1110,13 +1110,14 @@ internal fun hookStoryPoolAdd(
             val item = param.args.getOrNull(0)
             val blockReason = feedItemInspector.storyPoolBlockReason(item)
             if (blockReason == null) {
-                if (logAllowedItems && item != null) {
+                // Opt 1.3: Lazy evaluation for diagnostic string formatting in debug builds
+                if (BuildConfig.DEBUG && logAllowedItems && item != null) {
                     logHookHitThrottled(
                         "shortsPoolAddAllowed",
                         method,
                         feedItemInspector.describe(item)
                     )
-                } else if (feedItemInspector.isSponsoredFeedItem(item)) {
+                } else if (BuildConfig.DEBUG && feedItemInspector.isSponsoredFeedItem(item)) {
                     logHookHitThrottled("storyPoolBroadAllowed", method, feedItemInspector.describe(item))
                 }
                 return
@@ -1126,7 +1127,7 @@ internal fun hookStoryPoolAdd(
             logHookHitThrottled(
                 if (blockReason == "strict") "storyPoolStrictBlock" else "storyPoolBroadNetworkBlock",
                 method,
-                feedItemInspector.describe(item)
+                if (BuildConfig.DEBUG) feedItemInspector.describe(item) else null
             )
         }
     })
@@ -1160,11 +1161,12 @@ internal fun hookReelsBannerRender(method: Method) {
     })
 }
 
+// Opt 1.2: Direct CharSequence checks avoiding intermediate lowercase/trim String allocations
 internal fun isReelsShoppingStickerMarkerText(value: CharSequence?): Boolean {
     if (value.isNullOrBlank()) return false
-    val normalized = value.toString().lowercase().trim()
-    if (!normalized.contains(" - ") || !normalized.contains(", ")) return false
-    return REELS_SHOPPING_STICKER_CTA_TOKENS.any { token -> normalized.endsWith(token) }
+    if (!value.contains(" - ") || !value.contains(", ")) return false
+    val trimmed = value.trim()
+    return REELS_SHOPPING_STICKER_CTA_TOKENS.any { token -> trimmed.endsWith(token, ignoreCase = true) }
 }
 
 // Marketplace sponsored tiles are React Native content rendered from Relay

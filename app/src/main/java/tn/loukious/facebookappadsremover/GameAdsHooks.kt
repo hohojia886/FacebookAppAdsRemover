@@ -1337,18 +1337,16 @@ internal fun tryHookGameAdDiagnosticClass(clazz: Class<*>) {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         if (!shouldLogGameAdDiagnosticCall(method, param.args)) return
                         markGameAdDiagnosticFlow("dynamic ${method.declaringClass.name}.${method.name}")
-                        logGameAdDiagnostic(
-                            "dynamic.before",
+                        logGameAdDiagnostic("dynamic.before") {
                             "${methodSignature(method)} this=${formatDiagValue(param.thisObject)} args=${formatDiagArgs(param.args)}"
-                        )
+                        }
                     }
 
                     override fun afterHookedMethod(param: MethodHookParam) {
                         if (!shouldLogGameAdDiagnosticCall(method, param.args) && !isRecentGameAdDiagnosticFlow()) return
-                        logGameAdDiagnostic(
-                            "dynamic.after",
+                        logGameAdDiagnostic("dynamic.after") {
                             "${methodSignature(method)} result=${formatDiagValue(param.result)} throwable=${formatDiagThrowable(param.throwable)}"
-                        )
+                        }
                     }
                 })
                 hooked++
@@ -1365,19 +1363,18 @@ internal fun tryHookGameAdDiagnosticClass(clazz: Class<*>) {
 internal fun logGameAdDiagnosticClass(clazz: Class<*>) {
     if (!gameAdDiagnosticClassesLogged.add(clazz.name)) return
 
-    val methodSummary = runCatching {
-        (clazz.declaredMethods + clazz.methods)
-            .asSequence()
-            .filter { isGameAdDiagnosticMethod(clazz, it) }
-            .distinctBy { methodSignature(it) }
-            .take(16)
-            .joinToString(";") { method -> "${method.name}(${method.parameterTypes.joinToString(",") { it.simpleName }})>${method.returnType.simpleName}" }
-    }.getOrDefault("")
+    logGameAdDiagnostic("class.loaded") {
+        val methodSummary = runCatching {
+            (clazz.declaredMethods + clazz.methods)
+                .asSequence()
+                .filter { isGameAdDiagnosticMethod(clazz, it) }
+                .distinctBy { methodSignature(it) }
+                .take(16)
+                .joinToString(";") { method -> "${method.name}(${method.parameterTypes.joinToString(",") { it.simpleName }})>${method.returnType.simpleName}" }
+        }.getOrDefault("")
 
-    logGameAdDiagnostic(
-        "class.loaded",
         "${clazz.name} super=${clazz.superclass?.name} interfaces=${clazz.interfaces.joinToString { it.name }} methods=$methodSummary"
-    )
+    }
 }
 
 internal fun markGameAdDiagnosticFlow(reason: String) {
@@ -1391,14 +1388,20 @@ internal fun isRecentGameAdDiagnosticFlow(): Boolean {
     return timestamp > 0 && System.currentTimeMillis() - timestamp < GAME_AD_DIAG_FLOW_WINDOW_MS
 }
 
-internal fun logGameAdDiagnostic(event: String, detail: String) {
+// Opt 1.3: Lazy evaluation overload to avoid constructing diagnostic string payloads when diagnostics are disabled or throttled
+internal inline fun logGameAdDiagnostic(event: String, crossinline detailSupplier: () -> String) {
     if (!ENABLE_GAME_AD_DIAGNOSTICS) return
 
     val count = gameAdDiagnosticLogCount.incrementAndGet()
     when {
-        count <= GAME_AD_DIAG_LOG_LIMIT -> Log.i(TAG, "GADIAG[$count] $event ${truncateDiag(detail)}")
+        count <= GAME_AD_DIAG_LOG_LIMIT -> Log.i(TAG, "GADIAG[$count] $event ${truncateDiag(detailSupplier())}")
         count == GAME_AD_DIAG_LOG_LIMIT + 1 -> Log.i(TAG, "GADIAG log limit reached; suppressing further diagnostics")
     }
+}
+
+internal fun logGameAdDiagnostic(event: String, detail: String) {
+    if (!ENABLE_GAME_AD_DIAGNOSTICS) return
+    logGameAdDiagnostic(event) { detail }
 }
 
 internal fun formatDiagArgs(args: Array<Any?>?): String {

@@ -569,23 +569,24 @@ internal fun shouldSkipVisibleAdTraceType(type: Class<*>): Boolean {
         name.startsWith("android.content.res.")
 }
 
+// Opt 1.2: Direct CharSequence matching without intermediate String lowercasing allocations
 internal fun isVisibleAdTraceString(value: String): Boolean {
-    val normalized = value.lowercase()
-    return normalized.contains("xtreme-pc") ||
-        normalized.contains("book now") ||
-        normalized.contains("hide ad") ||
-        normalized.contains("samurai") ||
-        normalized.contains("sponsored") ||
-        normalized.contains("ad choices") ||
-        normalized.contains("adchoices") ||
-        normalized.contains("apply now") ||
-        normalized.contains("send message") ||
-        normalized.contains("learn more") ||
-        normalized.contains("shop now") ||
-        normalized.contains("contact us") ||
-        normalized.contains("get quote") ||
-        normalized.contains("call now") ||
-        normalized.contains("sign up")
+    if (value.isBlank()) return false
+    return value.contains("xtreme-pc", ignoreCase = true) ||
+        value.contains("book now", ignoreCase = true) ||
+        value.contains("hide ad", ignoreCase = true) ||
+        value.contains("samurai", ignoreCase = true) ||
+        value.contains("sponsored", ignoreCase = true) ||
+        value.contains("ad choices", ignoreCase = true) ||
+        value.contains("adchoices", ignoreCase = true) ||
+        value.contains("apply now", ignoreCase = true) ||
+        value.contains("send message", ignoreCase = true) ||
+        value.contains("learn more", ignoreCase = true) ||
+        value.contains("shop now", ignoreCase = true) ||
+        value.contains("contact us", ignoreCase = true) ||
+        value.contains("get quote", ignoreCase = true) ||
+        value.contains("call now", ignoreCase = true) ||
+        value.contains("sign up", ignoreCase = true)
 }
 
 internal val wrapperListFieldCache = ConcurrentHashMap<Class<*>, Optional<Field>>()
@@ -594,12 +595,56 @@ internal fun hookListResultFilter(method: Method, source: String, inspector: AdS
     XposedBridge.hookMethod(method, object : XC_MethodHook() {
         override fun afterHookedMethod(param: MethodHookParam) {
             val result = param.result as? MutableList<Any?> ?: return
+            // Opt 1.1: Fast-path return on empty result list
+            if (result.isEmpty()) return
             val removed = filterAdItems(result, inspector)
             if (removed > 0) {
                 Log.i(TAG, "Removed $removed ad item(s) from $source")
             }
         }
     })
+}
+
+private data class FilterSponsoredResult(val keptItems: List<Any?>?, val removedCount: Int)
+
+// Opt 1.1: Deferred list allocation helper to achieve zero-allocation filtering when no ads exist
+private fun filterSponsoredFeedItems(
+    items: Iterable<*>,
+    feedItemInspector: FeedItemInspector
+): FilterSponsoredResult {
+    if (items is Collection<*> && items.isEmpty()) {
+        return FilterSponsoredResult(null, 0)
+    }
+    var keptItems: ArrayList<Any?>? = null
+    var removed = 0
+    var index = 0
+
+    for (item in items) {
+        if (feedItemInspector.isDefinitelySponsoredFeedItem(item)) {
+            if (keptItems == null) {
+                // Instantiate ArrayList only on encountering the first sponsored ad item
+                keptItems = ArrayList<Any?>().apply {
+                    if (items is List<*>) {
+                        for (i in 0 until index) {
+                            add(items[i])
+                        }
+                    } else {
+                        var count = 0
+                        for (prev in items) {
+                            if (count >= index) break
+                            add(prev)
+                            count++
+                        }
+                    }
+                }
+            }
+            removed++
+        } else {
+            keptItems?.add(item)
+        }
+        index++
+    }
+    return FilterSponsoredResult(keptItems, removed)
 }
 
 internal fun hookFeedCsrFilterInput(
@@ -612,21 +657,11 @@ internal fun hookFeedCsrFilterInput(
     XposedBridge.hookMethod(hook.method, object : XC_MethodHook() {
         override fun beforeHookedMethod(param: MethodHookParam) {
             val filterName = hook.method.declaringClass.name
-            val originalList = param.args.getOrNull(hook.listArgIndex) as? Iterable<*>
-            if (originalList == null) return
+            val originalList = param.args.getOrNull(hook.listArgIndex) as? Iterable<*> ?: return
             logFeedItems("$filterName IN", originalList, feedItemInspector)
-            val keptItems = ArrayList<Any?>()
-            var removed = 0
+            val (keptItems, removed) = filterSponsoredFeedItems(originalList, feedItemInspector)
 
-            for (item in originalList) {
-                if (feedItemInspector.isDefinitelySponsoredFeedItem(item)) {
-                    removed++
-                } else {
-                    keptItems.add(item)
-                }
-            }
-
-            if (removed <= 0) return
+            if (removed <= 0 || keptItems == null) return
 
             val rebuilt = buildImmutableListLike(param.args.getOrNull(hook.listArgIndex), keptItems) ?: return
             param.args[hook.listArgIndex] = rebuilt
@@ -638,16 +673,8 @@ internal fun hookFeedCsrFilterInput(
             val resultItems = extractFeedItemsFromResult(param.result)
             if (resultItems != null) {
                 logFeedItems("$filterName OUT", resultItems, feedItemInspector)
-                val keptItems = ArrayList<Any?>()
-                var removed = 0
-                for (item in resultItems) {
-                    if (feedItemInspector.isDefinitelySponsoredFeedItem(item)) {
-                        removed++
-                    } else {
-                        keptItems.add(item)
-                    }
-                }
-                if (removed > 0 && replaceFeedItemsInResult(param, keptItems)) {
+                val (keptItems, removed) = filterSponsoredFeedItems(resultItems, feedItemInspector)
+                if (removed > 0 && keptItems != null && replaceFeedItemsInResult(param, keptItems)) {
                     Log.i(TAG, "Removed $removed sponsored feed item(s) from result of ${hook.method.declaringClass.name}.${hook.method.name}")
                 }
             }
@@ -666,18 +693,9 @@ internal fun hookLateFeedListSanitizer(
     XposedBridge.hookMethod(hook.method, object : XC_MethodHook() {
         override fun beforeHookedMethod(param: MethodHookParam) {
             val originalList = param.args.getOrNull(hook.listArgIndex) as? Iterable<*> ?: return
-            val keptItems = ArrayList<Any?>()
-            var removed = 0
+            val (keptItems, removed) = filterSponsoredFeedItems(originalList, feedItemInspector)
 
-            for (item in originalList) {
-                if (feedItemInspector.isDefinitelySponsoredFeedItem(item)) {
-                    removed++
-                } else {
-                    keptItems.add(item)
-                }
-            }
-
-            if (removed <= 0) return
+            if (removed <= 0 || keptItems == null) return
 
             val rebuilt = buildImmutableListLike(param.args.getOrNull(hook.listArgIndex), keptItems) ?: return
             param.args[hook.listArgIndex] = rebuilt
@@ -964,29 +982,26 @@ internal fun isAnyAdMarkerText(value: CharSequence?): Boolean {
 
 internal fun isFeedAdMarkerText(value: CharSequence?): Boolean {
     if (value.isNullOrBlank()) return false
-    val normalized = value.toString().lowercase()
-    return FEED_SURFACE_AD_MARKER_TOKENS.any { token -> normalized.contains(token) }
+    return FEED_SURFACE_AD_MARKER_TOKENS.any { token -> value.contains(token, ignoreCase = true) }
 }
 
 internal fun isExplicitFeedAdMarkerText(value: CharSequence?): Boolean {
     if (value.isNullOrBlank()) return false
-    val normalized = value.toString().lowercase()
-    return EXPLICIT_FEED_CARD_AD_MARKER_TOKENS.any { token -> normalized.contains(token) }
+    return EXPLICIT_FEED_CARD_AD_MARKER_TOKENS.any { token -> value.contains(token, ignoreCase = true) }
 }
 
 internal fun isExplicitFeedAdCtaText(value: CharSequence?): Boolean {
     if (value.isNullOrBlank()) return false
-    val normalized = value.toString().lowercase()
-    return EXPLICIT_FEED_AD_CTA_TOKENS.any { token -> normalized.contains(token) }
+    return EXPLICIT_FEED_AD_CTA_TOKENS.any { token -> value.contains(token, ignoreCase = true) }
 }
 
 internal fun isFeedReelCtaAdMarkerText(value: CharSequence?): Boolean {
     if (value.isNullOrBlank()) return false
-    val normalized = value.toString().lowercase()
-    return FEED_REEL_CTA_AD_MARKER_TOKENS.any { token -> normalized.contains(token) }
+    return FEED_REEL_CTA_AD_MARKER_TOKENS.any { token -> value.contains(token, ignoreCase = true) }
 }
 
 internal fun filterAdItems(list: MutableList<Any?>, inspector: AdStoryInspector): Int {
+    if (list.isEmpty()) return 0
     var removed = 0
     val iterator = list.iterator()
     while (iterator.hasNext()) {
@@ -1085,7 +1100,9 @@ internal fun extractFeedItemsFromResult(result: Any?): Iterable<*>? {
     }.getOrNull()
 }
 
+// Opt 1.3: Bypass item iteration and heavy describe() string formatting in production release builds
 internal fun logFeedItems(source: String, items: Iterable<*>, feedItemInspector: FeedItemInspector) {
+    if (!BuildConfig.DEBUG) return
     var index = 0
     for (item in items) {
         Log.i(TAG, "FeedItem $source[$index] ${feedItemInspector.describe(item)}")

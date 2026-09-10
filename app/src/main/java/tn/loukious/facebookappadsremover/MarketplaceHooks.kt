@@ -168,9 +168,7 @@ internal fun hookMarketplaceSendRequest(sendRequest: Method): Boolean {
     XposedBridge.hookMethod(sendRequest, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     val body = requestBodyOf(param.args.getOrNull(4)) ?: return
-                    val name = marketplaceQueryNameRegex.find(body)?.groupValues?.get(1)
-                        ?: marketplaceFormQueryIdRegex.find(body)?.groupValues?.get(1)
-                        ?: "persisted"
+                    val name = extractMarketplaceQueryName(body)
                     if (BuildConfig.DEBUG) {
                         val url = param.args.getOrNull(1) as? String ?: ""
                         if (marketplaceDiagnosedQueries.add("req:$url|$name")) {
@@ -343,6 +341,19 @@ internal val marketplaceQueryNameRegex = Regex("query[\\s]+([A-Za-z0-9_]+)")
 // Persisted Relay requests are form-encoded and carry the readable query
 // name in fb_api_req_friendly_name plus a numeric doc_id.
 internal val marketplaceFormQueryIdRegex = Regex("fb_api_req_friendly_name=([A-Za-z0-9_]+)")
+
+// Opt 1.2: Fast string pre-check before Regex evaluation to avoid unnecessary Regex execution over large request bodies
+internal fun extractMarketplaceQueryName(body: String): String {
+    if (body.contains("fb_api_req_friendly_name=")) {
+        val match = marketplaceFormQueryIdRegex.find(body)
+        if (match != null) return match.groupValues[1]
+    }
+    if (body.contains("query")) {
+        val match = marketplaceQueryNameRegex.find(body)
+        if (match != null) return match.groupValues[1]
+    }
+    return "persisted"
+}
 
 // The RN Networking module hands every response body to JavaScript through the
 // static emitters of one class (found via its stable "didReceiveNetworkData"
