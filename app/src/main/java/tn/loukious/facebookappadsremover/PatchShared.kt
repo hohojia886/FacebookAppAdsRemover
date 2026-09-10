@@ -353,7 +353,7 @@ internal object Log {
         if (BuildConfig.DEBUG) AndroidLog.e(tag, msg, throwable) else 0
 
     inline fun missing(tag: String, hookName: String): Int =
-        AndroidLog.w(tag, "Hook target not found: $hookName")
+        AndroidLog.w(tag, "[Resolve] Hook target not found: $hookName")
 
     inline fun resolutionFailure(tag: String, msg: String, throwable: Throwable): Int {
         return if (BuildConfig.DEBUG || throwable.message?.contains("Unable to resolve") == true) {
@@ -723,7 +723,7 @@ internal fun logHookHitThrottled(hookName: String, method: Method, detail: Strin
     val hits = hookHitCounters.computeIfAbsent(hookName) { AtomicInteger(0) }.incrementAndGet()
     if (hits <= 3 || hits % HOOK_HIT_LOG_EVERY == 0) {
         val extra = detail?.let { " $it" } ?: ""
-        Log.i(TAG, "Hook hit $hookName count=$hits at ${method.declaringClass.name}.${method.name}$extra")
+        Log.i(TAG, "[Hit] Hook hit $hookName count=$hits at ${method.declaringClass.name}.${method.name}$extra")
     }
 }
 

@@ -66,7 +66,7 @@ internal fun logWrapperChildClass(owner: Any, wrapperChildField: Field) {
     val child = runCatching { wrapperChildField.get(owner) }.getOrNull() ?: return
     val key = "${owner.javaClass.name} -> ${child.javaClass.name}"
     if (feedWrapperChildClassesLogged.add(key)) {
-        Log.i(TAG, "Feed wrapper child=$key")
+        Log.i(TAG, "[Feed] Feed wrapper child=$key")
     }
 }
 
@@ -282,17 +282,17 @@ fun loadCachedFeedGuardCandidates(
     return runCatching {
         val file = File(context.cacheDir, FEED_GUARD_CACHE_FILE)
         if (!file.exists()) {
-            Log.i(TAG, "Feed guard cache missing; re-discovering")
+            Log.i(TAG, "[Cache] Feed guard cache missing; re-discovering")
             return 0
         }
         val properties = Properties()
         file.inputStream().use { properties.load(it) }
         if (hostVersionName != properties.getProperty("version")) {
-            Log.i(TAG, "Feed guard cache stale for version=$hostVersionName; re-discovering")
+            Log.i(TAG, "[Cache] Feed guard cache stale for version=$hostVersionName; re-discovering")
             return 0
         }
         if (feedGuardCacheModuleKey() != properties.getProperty("moduleVersion")) {
-            Log.i(TAG, "Feed guard cache stale for moduleVersion=${feedGuardCacheModuleKey()}; re-discovering")
+            Log.i(TAG, "[Cache] Feed guard cache stale for moduleVersion=${feedGuardCacheModuleKey()}; re-discovering")
             return 0
         }
         feedGuardCachedComponentNames = properties.getProperty("components").orEmpty()
@@ -304,12 +304,12 @@ fun loadCachedFeedGuardCandidates(
         lastSavedFeedGuardCachePayload = "$hostVersionName|${feedGuardCacheModuleKey()}|${feedGuardCachedComponentNames.joinToString(",")}|${feedGuardCachedWrapperNames.joinToString(",")}"
         Log.i(
             TAG,
-            "Loaded feed guard cache components=$feedGuardCachedComponentNames " +
+            "[Cache] Loaded feed guard cache components=$feedGuardCachedComponentNames " +
                 "wrappers=$feedGuardCachedWrapperNames registeredNow=$registered"
         )
         registered
     }.onFailure {
-        Log.w(TAG, "Failed to load feed guard cache", it)
+        Log.w(TAG, "[Cache] Failed to load feed guard cache", it)
     }.getOrDefault(0)
 }
 
@@ -325,7 +325,7 @@ fun saveFeedGuardCandidateCache(context: Context, hostVersionName: String) {
 
     val payload = "$hostVersionName|${feedGuardCacheModuleKey()}|${components.joinToString(",")}|${wrappers.joinToString(",")}"
     if (payload == lastSavedFeedGuardCachePayload) {
-        if (BuildConfig.DEBUG) Log.i(TAG, "Feed guard cache payload unchanged; suppressing write")
+        if (BuildConfig.DEBUG) Log.i(TAG, "[Cache] Feed guard cache payload unchanged; suppressing write")
         return
     }
 
@@ -339,9 +339,9 @@ fun saveFeedGuardCandidateCache(context: Context, hostVersionName: String) {
             properties.setProperty("wrappers", wrappers.joinToString(","))
             file.outputStream().use { properties.store(it, null) }
             lastSavedFeedGuardCachePayload = payload
-            Log.i(TAG, "Saved feed guard cache components=$components wrappers=$wrappers")
+            Log.i(TAG, "[Cache] Saved feed guard cache components=$components wrappers=$wrappers")
         }.onFailure {
-            Log.w(TAG, "Failed to save feed guard cache", it)
+            Log.w(TAG, "[Cache] Failed to save feed guard cache", it)
         }
     }
 }
@@ -374,32 +374,32 @@ internal fun logSurvivingFeedTypeContract(classLoader: ClassLoader, className: S
     val type = runCatching {
         Class.forName(className, false, classLoader)
     }.getOrElse {
-        Log.w(TAG, "SurvivingFeedType class unavailable=$className")
+        Log.w(TAG, "[Feed] SurvivingFeedType class unavailable=$className")
         return
     }
     Log.i(
         TAG,
-        "SurvivingFeedType class=${type.name} super=${type.superclass?.name} " +
+        "[Feed] SurvivingFeedType class=${type.name} super=${type.superclass?.name} " +
             "interfaces=${type.interfaces.joinToString { it.name }}"
     )
     type.declaredFields.forEach { field ->
         Log.i(
             TAG,
-            "SurvivingFeedType field=${type.name}.${field.name}:${field.type.name} " +
+            "[Feed] SurvivingFeedType field=${type.name}.${field.name}:${field.type.name} " +
                 "static=${Modifier.isStatic(field.modifiers)}"
         )
     }
     type.declaredConstructors.forEach { constructor ->
         Log.i(
             TAG,
-            "SurvivingFeedType ctor=${type.name}(" +
+            "[Feed] SurvivingFeedType ctor=${type.name}(" +
                 constructor.parameterTypes.joinToString { it.name } + ")"
         )
     }
     type.declaredMethods.forEach { method ->
         Log.i(
             TAG,
-            "SurvivingFeedType method=${type.name}.${method.name}(" +
+            "[Feed] SurvivingFeedType method=${type.name}.${method.name}(" +
                 method.parameterTypes.joinToString { it.name } + "):${method.returnType.name} " +
                 "static=${Modifier.isStatic(method.modifiers)}"
         )
@@ -429,7 +429,7 @@ fun installFacebookVisibleAdTrace(classLoader: ClassLoader) {
             )
         }
     })
-    Log.i(TAG, "Installed visible-ad holder tracer")
+    Log.i(TAG, "[Feed] Installed visible-ad holder tracer")
 }
 
 internal fun traceVisibleFacebookFeedAd(
@@ -519,7 +519,7 @@ internal fun traceVisibleAdObjectGraph(
             matches++
             Log.i(
                 TAG,
-                "VisibleAdTrace feedObject path=${node.path} class=$typeName " +
+                "[Feed] VisibleAdTrace feedObject path=${node.path} class=$typeName " +
                     inspector.describe(value)
             )
         }
@@ -528,7 +528,7 @@ internal fun traceVisibleAdObjectGraph(
             val text = value.toString()
             if (isVisibleAdTraceString(text)) {
                 matches++
-                Log.i(TAG, "VisibleAdTrace string path=${node.path} value=${text.take(300)}")
+                Log.i(TAG, "[Feed] VisibleAdTrace string path=${node.path} value=${text.take(300)}")
             }
             continue
         }
@@ -565,7 +565,7 @@ internal fun traceVisibleAdObjectGraph(
             )
         }
     }
-    Log.i(TAG, "VisibleAdTrace graph root=$rootPath visited=$visited matches=$matches")
+    Log.i(TAG, "[Feed] VisibleAdTrace graph root=$rootPath visited=$visited matches=$matches")
 }
 
 internal fun isTraceableFeedObject(type: Class<*>): Boolean {
@@ -614,7 +614,7 @@ internal fun hookListResultFilter(method: Method, source: String, inspector: AdS
             if (result.isEmpty()) return
             val removed = filterAdItems(result, inspector)
             if (removed > 0) {
-                Log.i(TAG, "Removed $removed ad item(s) from $source")
+                Log.i(TAG, "[Feed] Removed $removed ad item(s) from $source")
             }
         }
     })
@@ -680,7 +680,7 @@ internal fun hookFeedCsrFilterInput(
 
             val rebuilt = buildImmutableListLike(param.args.getOrNull(hook.listArgIndex), keptItems) ?: return
             param.args[hook.listArgIndex] = rebuilt
-            Log.i(TAG, "Removed $removed sponsored feed item(s) before ${hook.method.declaringClass.name}.${hook.method.name}")
+            Log.i(TAG, "[Feed] Removed $removed sponsored feed item(s) before ${hook.method.declaringClass.name}.${hook.method.name}")
         }
 
         override fun afterHookedMethod(param: MethodHookParam) {
@@ -690,7 +690,7 @@ internal fun hookFeedCsrFilterInput(
                 logFeedItems("$filterName OUT", resultItems, feedItemInspector)
                 val (keptItems, removed) = filterSponsoredFeedItems(resultItems, feedItemInspector)
                 if (removed > 0 && keptItems != null && replaceFeedItemsInResult(param, keptItems)) {
-                    Log.i(TAG, "Removed $removed sponsored feed item(s) from result of ${hook.method.declaringClass.name}.${hook.method.name}")
+                    Log.i(TAG, "[Feed] Removed $removed sponsored feed item(s) from result of ${hook.method.declaringClass.name}.${hook.method.name}")
                 }
             }
         }
@@ -716,7 +716,7 @@ internal fun hookLateFeedListSanitizer(
             param.args[hook.listArgIndex] = rebuilt
             Log.i(
                 TAG,
-                "Late-stage removed $removed sponsored feed item(s) before ${hook.method.declaringClass.name}.${hook.method.name}"
+                "[Feed] Late-stage removed $removed sponsored feed item(s) before ${hook.method.declaringClass.name}.${hook.method.name}"
             )
         }
     })
@@ -770,7 +770,7 @@ internal fun traceSurvivingFeedAdSourceOnce(source: View, target: View, reason: 
         }
         .take(48)
         .forEachIndexed { index, frame ->
-            Log.i(TAG, "SurvivingFeedAdTrace stack[$index]=$frame")
+            Log.i(TAG, "[Feed] SurvivingFeedAdTrace stack[$index]=$frame")
         }
 
     val classLoader = target.javaClass.classLoader ?: source.javaClass.classLoader ?: return
@@ -1120,10 +1120,10 @@ internal fun logFeedItems(source: String, items: Iterable<*>, feedItemInspector:
     if (!BuildConfig.DEBUG) return
     var index = 0
     for (item in items) {
-        Log.i(TAG, "FeedItem $source[$index] ${feedItemInspector.describe(item)}")
+        Log.i(TAG, "[Feed] FeedItem $source[$index] ${feedItemInspector.describe(item)}")
         index++
     }
-    Log.i(TAG, "FeedItem $source count=$index")
+    Log.i(TAG, "[Feed] FeedItem $source count=$index")
 }
 
 internal fun installFeedHooksPipeline(
@@ -1139,7 +1139,7 @@ internal fun installFeedHooksPipeline(
         if (installFacebookFeedComponentGuard(classLoader)) {
             installedAny = true
         }
-    }.onFailure { Log.e(TAG, "Failed feed component guard / visible ad trace", it) }
+    }.onFailure { Log.e(TAG, "[Feed] Failed feed component guard / visible ad trace", it) }
 
     if (ENABLE_FEED_CSR_FILTER_HOOKS) {
         hooks.feedCsrFilterHooks.forEach { hook ->
@@ -1147,11 +1147,11 @@ internal fun installFeedHooksPipeline(
                 hookFeedCsrFilterInput(hook, feedItemInspector)
                 installedAny = true
             }.onFailure {
-                Log.e(TAG, "Failed to hook feed CSR filter ${hook.method.declaringClass.name}.${hook.method.name}", it)
+                Log.e(TAG, "[Feed] Failed to hook feed CSR filter ${hook.method.declaringClass.name}.${hook.method.name}", it)
             }
         }
     } else {
-        Log.i(TAG, "Skipped feed CSR filter hooks to isolate feed Reels carousel loading")
+        Log.i(TAG, "[Feed] Skipped feed CSR filter hooks to isolate feed Reels carousel loading")
     }
 
     if (ENABLE_LATE_FEED_LIST_HOOKS) {
@@ -1160,11 +1160,11 @@ internal fun installFeedHooksPipeline(
                 hookLateFeedListSanitizer(hook, feedItemInspector)
                 installedAny = true
             }.onFailure {
-                Log.e(TAG, "Failed to hook late feed list ${hook.method.declaringClass.name}.${hook.method.name}", it)
+                Log.e(TAG, "[Feed] Failed to hook late feed list ${hook.method.declaringClass.name}.${hook.method.name}", it)
             }
         }
     } else {
-        Log.i(TAG, "Skipped late feed list hooks to isolate feed Reels carousel loading")
+        Log.i(TAG, "[Feed] Skipped late feed list hooks to isolate feed Reels carousel loading")
     }
 
     if (ENABLE_FEED_SPONSORED_POOL_HOOKS) {
@@ -1188,7 +1188,7 @@ internal fun installFeedHooksPipeline(
             }
         }
     } else {
-        Log.i(TAG, "Skipped feed sponsored pool hooks to isolate feed Reels carousel loading")
+        Log.i(TAG, "[Feed] Skipped feed sponsored pool hooks to isolate feed Reels carousel loading")
     }
     return installedAny
 }

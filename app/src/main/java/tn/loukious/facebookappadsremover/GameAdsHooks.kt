@@ -98,9 +98,9 @@ internal fun hookVoidMethodsByString(
                     param.result = null
                 }
             })
-            Log.i(TAG, "$label: ${method.declaringClass.name}.${method.name}")
+            Log.i(TAG, "[GameAds] $label: ${method.declaringClass.name}.${method.name}")
         }
-    }.onFailure { Log.w(TAG, "$label resolution failed", it) }
+    }.onFailure { Log.w(TAG, "[GameAds] $label resolution failed", it) }
 }
 
 internal fun hookGameAdRequest(method: Method) {
@@ -225,13 +225,13 @@ fun installGameAdJavascriptInterfaceBridgeHook() {
                 val bridgeObject = param.args.getOrNull(0) ?: return
                 runCatching { hookGameAdBridgeObject(bridgeObject, "addJavascriptInterface") }
                     .onFailure {
-                        Log.w(TAG, "Failed to hook game bridge object ${bridgeObject.javaClass.name}", it)
+                        Log.w(TAG, "[GameAds] Failed to hook game bridge object ${bridgeObject.javaClass.name}", it)
                     }
             }
         })
-        Log.i(TAG, "Waiting for game webview Javascript bridges")
+        Log.i(TAG, "[GameAds] Waiting for game webview Javascript bridges")
     }.onFailure {
-        Log.w(TAG, "Failed to hook WebView.addJavascriptInterface", it)
+        Log.w(TAG, "[GameAds] Failed to hook WebView.addJavascriptInterface", it)
     }
 
     // Promise deliveries can happen before the DexKit scan, so the webview
@@ -257,7 +257,7 @@ internal fun hookGameAdBridgeObject(bridgeObject: Any, source: String) {
         if (!gameAdBridgeEntryMethodsHooked.add(methodHookKey(method))) return@forEach
         method.isAccessible = true
         hookGameAdBridge(method)
-        Log.i(TAG, "Hooked game bridge entry ${bridgeClass.name}.${method.name} via $source")
+        Log.i(TAG, "[GameAds] Hooked game bridge entry ${bridgeClass.name}.${method.name} via $source")
     }
 
     hookGameAdResultMethods(bridgeClass)
@@ -295,11 +295,11 @@ fun installGameAdScriptResultHooks() {
                 val rewritten = rewriteGameAdDeliveryIfNeeded(data, "postWebMessage") ?: return
                 runCatching {
                     param.args[0] = constructor.newInstance(rewritten)
-                    Log.i(TAG, "Rewrote game ad web message promise delivery")
+                    Log.i(TAG, "[GameAds] Rewrote game ad web message promise delivery")
                 }
             }
         })
-        Log.i(TAG, "Watching WebView.postWebMessage for game ad promise results")
+        Log.i(TAG, "[GameAds] Watching WebView.postWebMessage for game ad promise results")
     }
 }
 
@@ -314,7 +314,7 @@ internal fun hookWebViewScriptDelivery(name: String, vararg parameterTypes: Clas
                 param.args[0] = rewritten
             }
         })
-        Log.i(TAG, "Watching WebView.$name for game ad promise results")
+        Log.i(TAG, "[GameAds] Watching WebView.$name for game ad promise results")
     }
 }
 
@@ -3226,49 +3226,49 @@ internal fun installGameAdsHooksPipeline(
 
     hooks.gameAdRequestMethods.forEach { method ->
         runCatching { hookGameAdRequest(method); installedAny = true }
-            .onFailure { Log.e(TAG, "Failed to hook game ad request ${method.declaringClass.name}.${method.name}", it) }
+            .onFailure { Log.e(TAG, "[GameAds] Failed to hook game ad request ${method.declaringClass.name}.${method.name}", it) }
     }
 
     hooks.gameAdBridgePostMessageMethod?.let { method ->
         gameAdBridgeEntryMethodsHooked.add(methodHookKey(method))
         runCatching { hookGameAdBridge(method); installedAny = true }
-            .onFailure { Log.e(TAG, "Failed to hook game ad bridge ${method.declaringClass.name}.${method.name}", it) }
+            .onFailure { Log.e(TAG, "[GameAds] Failed to hook game ad bridge ${method.declaringClass.name}.${method.name}", it) }
     }
 
     hooks.gameAdRequestMethods.firstOrNull()?.declaringClass?.let { bridgeClass ->
         runCatching { hookGameAdResultMethods(bridgeClass); installedAny = true }
-            .onFailure { Log.e(TAG, "Failed to hook game ad result helpers ${bridgeClass.name}", it) }
+            .onFailure { Log.e(TAG, "[GameAds] Failed to hook game ad result helpers ${bridgeClass.name}", it) }
         runCatching { hookGameAdServiceDispatchMethods(bridgeClass); installedAny = true }
-            .onFailure { Log.e(TAG, "Failed to hook game ad service dispatch ${bridgeClass.name}", it) }
+            .onFailure { Log.e(TAG, "[GameAds] Failed to hook game ad service dispatch ${bridgeClass.name}", it) }
     }
 
     if (ENABLE_AUDIENCE_NETWORK_REWARD_FALLBACKS) {
         runCatching { hookAudienceNetworkRewardFallbacks(classLoader); installedAny = true }
-            .onFailure { Log.e(TAG, "Failed to hook Audience Network reward fallbacks", it) }
+            .onFailure { Log.e(TAG, "[GameAds] Failed to hook Audience Network reward fallbacks", it) }
     } else {
-        Log.i(TAG, "Skipped Audience Network reward fallback hooks for compatibility mode")
+        Log.i(TAG, "[GameAds] Skipped Audience Network reward fallback hooks for compatibility mode")
     }
 
     runCatching { installGameAdJavascriptInterfaceBridgeHook(); installedAny = true }
     runCatching { hookGameAdSystemDiagnostics(classLoader) }
-        .onFailure { Log.e(TAG, "Failed to hook game ad diagnostics", it) }
+        .onFailure { Log.e(TAG, "[GameAds] Failed to hook game ad diagnostics", it) }
 
     hooks.playableAdActivityOnCreate?.let { method ->
         runCatching { hookPlayableAdActivity(method); installedAny = true }
-            .onFailure { Log.e(TAG, "Failed to hook playable ad activity ${method.declaringClass.name}.${method.name}", it) }
+            .onFailure { Log.e(TAG, "[GameAds] Failed to hook playable ad activity ${method.declaringClass.name}.${method.name}", it) }
     }
 
     hooks.gameAdUiActivityMethods.forEach { method ->
         runCatching { hookPlayableAdActivity(method); installedAny = true }
-            .onFailure { Log.e(TAG, "Failed to hook game ad activity ${method.declaringClass.name}.${method.name}", it) }
+            .onFailure { Log.e(TAG, "[GameAds] Failed to hook game ad activity ${method.declaringClass.name}.${method.name}", it) }
     }
 
     runCatching { hookGlobalGameAdActivityLifecycleFallback(); installedAny = true }
-        .onFailure { Log.e(TAG, "Failed to hook global game ad activity lifecycle fallback", it) }
+        .onFailure { Log.e(TAG, "[GameAds] Failed to hook global game ad activity lifecycle fallback", it) }
     runCatching { hookGameAdActivityLaunchFallbacks(); installedAny = true }
-        .onFailure { Log.e(TAG, "Failed to hook game ad launch fallbacks", it) }
+        .onFailure { Log.e(TAG, "[GameAds] Failed to hook game ad launch fallbacks", it) }
     runCatching { hookGlobalGameAdSurfaceFallbacks(); installedAny = true }
-        .onFailure { Log.e(TAG, "Failed to hook global game ad surface fallbacks", it) }
+        .onFailure { Log.e(TAG, "[GameAds] Failed to hook global game ad surface fallbacks", it) }
 
     return installedAny
 }

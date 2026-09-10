@@ -58,10 +58,10 @@ class Module : IXposedHookLoadPackage {
                     resolveHostVersionName(application)
                 )
                 if (registered > 0) {
-                    debugLogInfo("Registered $registered cached feed guard candidate(s)")
+                    debugLogInfo("[Cache] Registered $registered cached feed guard candidate(s)")
                 }
             } catch (throwable: Throwable) {
-                debugLogError("Failed to load cached feed guard candidates", throwable)
+                debugLogError("[Cache] Failed to load cached feed guard candidates", throwable)
             }
         }
 
@@ -120,10 +120,10 @@ class Module : IXposedHookLoadPackage {
                     )
                 ) {
                     sMarketplaceNetGuardInstalled.set(true)
-                    debugLogInfo("Marketplace net guard installed from cache at attach")
+                    debugLogInfo("[Cache] Marketplace net guard installed from cache at attach")
                 }
             } catch (throwable: Throwable) {
-                debugLogError("Failed to load cached marketplace net guard", throwable)
+                debugLogError("[Cache] Failed to load cached marketplace net guard", throwable)
             }
         }
 
@@ -143,10 +143,10 @@ class Module : IXposedHookLoadPackage {
                     )
                 ) {
                     sMarketplaceNetGuardInstalled.set(true)
-                    debugLogInfo("Marketplace net guard installed from cache on retry")
+                    debugLogInfo("[Cache] Marketplace net guard installed from cache on retry")
                 }
             } catch (throwable: Throwable) {
-                debugLogError("Failed to retry cached marketplace net guard", throwable)
+                debugLogError("[Cache] Failed to retry cached marketplace net guard", throwable)
             } finally {
                 sMarketplaceNetGuardInProgress.set(false)
             }
@@ -219,11 +219,11 @@ class Module : IXposedHookLoadPackage {
                     }
                 }
                 debugLogInfo(
-                    "Waiting for Facebook MultiDex configure/long-tail load before installing decoded response hooks; " +
+                    "[Init] Waiting for Facebook MultiDex configure/long-tail load before installing decoded response hooks; " +
                             "fallbackHooks=$fallbackHooks"
                 )
             } catch (throwable: Throwable) {
-                debugLogError("Failed to hook Facebook MultiDex readiness; using timed fallback", throwable)
+                debugLogError("[Init] Failed to hook Facebook MultiDex readiness; using timed fallback", throwable)
             }
         }
 
@@ -254,14 +254,14 @@ class Module : IXposedHookLoadPackage {
                         targetLoader = classLoader
                     }
                     debugLogInfo(
-                        "Observed feed component class load=" + loadedClass.name +
+                        "[Init] Observed feed component class load=" + loadedClass.name +
                                 " component=" + componentName +
                                 " loader=" + targetLoader.javaClass.name
                     )
                     tryInstallFastFeedHooksAtDexReady(targetLoader, "class-load notification")
                 }
             })
-            debugLogInfo("Waiting for feed component class load before installing the component guard")
+            debugLogInfo("[Init] Waiting for feed component class load before installing the component guard")
         }
 
         private fun tryInstallFastFeedHooksAtDexReady(
@@ -279,7 +279,7 @@ class Module : IXposedHookLoadPackage {
             val unhook = sClassLoadNotifierUnhook ?: return
             sClassLoadNotifierUnhook = null
             unhook.unhook()
-            debugLogInfo("Removed class-load notifier after the component guard became active")
+            debugLogInfo("[Init] Removed class-load notifier after the component guard became active")
         }
 
         private fun scheduleHookInstallAttempts(classLoader: ClassLoader) {
@@ -335,10 +335,10 @@ class Module : IXposedHookLoadPackage {
             try {
                 if (installFacebookFeedComponentGuard(classLoader)) {
                     sFeedComponentGuardInstalled.set(true)
-                    debugLogInfo("Sponsored feed component guard installed at $readinessSource")
+                    debugLogInfo("[Init] Sponsored feed component guard installed at $readinessSource")
                 }
             } catch (throwable: Throwable) {
-                debugLogError("Failed sponsored feed component guard at $readinessSource", throwable)
+                debugLogError("[Init] Failed sponsored feed component guard at $readinessSource", throwable)
             } finally {
                 sComponentGuardInstallInProgress.set(false)
             }
@@ -351,7 +351,7 @@ class Module : IXposedHookLoadPackage {
 
             try {
                 DexKitBridge.create(classLoader, true).use { bridge ->
-                    debugLogInfo("Scanning Facebook secondary dex, attempt=$attemptNumber")
+                    debugLogInfo("[Init] Scanning Facebook secondary dex, attempt=$attemptNumber")
                     if (installFacebookAdRemover(classLoader, bridge)) {
                         sHooksInstalled.set(true)
                         saveFeedGuardCandidateCache()
@@ -359,11 +359,11 @@ class Module : IXposedHookLoadPackage {
                         saveMarketplaceNetGuardCache()
                         tryInstallFeedComponentGuard(classLoader, "full DexKit readiness")
                         removeClassLoadNotifierHook()
-                        debugLogInfo("Facebook ad remover hooks installed on attempt=$attemptNumber")
+                        debugLogInfo("[Init] Facebook ad remover hooks installed on attempt=$attemptNumber")
                     }
                 }
             } catch (throwable: Throwable) {
-                debugLogError("Failed to install Facebook ad remover on attempt=$attemptNumber", throwable)
+                debugLogError("[Init] Failed to install Facebook ad remover on attempt=$attemptNumber", throwable)
             } finally {
                 sInstallInProgress.set(false)
             }
@@ -387,7 +387,7 @@ class Module : IXposedHookLoadPackage {
             return
         }
 
-        debugLogInfo("Loading hooks for package=${lpparam.packageName} process=${lpparam.processName}")
+        debugLogInfo("[Init] Loading hooks for package=${lpparam.packageName} process=${lpparam.processName}")
         installFacebookDexReadyHook(lpparam.classLoader)
         ensureDexKitLoaded()
         if (!sAttachHookInstalled.compareAndSet(false, true)) {
@@ -408,7 +408,7 @@ class Module : IXposedHookLoadPackage {
                 try {
                     installGameAdJavascriptInterfaceBridgeHook()
                 } catch (throwable: Throwable) {
-                    debugLogError("Failed to install game bridge watcher", throwable)
+                    debugLogError("[Init] Failed to install game bridge watcher", throwable)
                 }
                 // The framework-only view-level safety net (marker-based ad
                 // hiding) must be active before the first feed/reels/marketplace
@@ -416,11 +416,11 @@ class Module : IXposedHookLoadPackage {
                 try {
                     installGlobalAdSurfaceFallbacksEarly()
                 } catch (throwable: Throwable) {
-                    debugLogError("Failed to install early ad surface fallbacks", throwable)
+                    debugLogError("[Init] Failed to install early ad surface fallbacks", throwable)
                 }
                 scheduleHookInstallAttempts(application.classLoader)
             }
         })
-        debugLogInfo("Waiting for Facebook Application.attach before scanning secondary dex")
+        debugLogInfo("[Init] Waiting for Facebook Application.attach before scanning secondary dex")
     }
 }

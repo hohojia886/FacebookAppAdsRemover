@@ -61,7 +61,7 @@ internal fun installReelsAdDiagnostics(classLoader: ClassLoader, bridge: DexKitB
         componentClasses.putIfAbsent(clazz.name, clazz)
     }
     if (componentClasses.isEmpty()) {
-        Log.w(TAG, "Reels ad caption component not found via string")
+        Log.w(TAG, "[Reels] Reels ad caption component not found via string")
         return
     }
 
@@ -77,11 +77,11 @@ internal fun installReelsAdDiagnostics(classLoader: ClassLoader, bridge: DexKitB
                         val args = param.args.orEmpty().joinToString(" | ") { arg ->
                             "${arg?.javaClass?.name}:${formatDiagValue(arg)}"
                         }
-                        Log.i(TAG, "ReelsAdDiag captionCtor ${clazz.name} args=[$args]")
+                        Log.i(TAG, "[Reels] ReelsAdDiag captionCtor ${clazz.name} args=[$args]")
                         param.thisObject?.let { describeReelsAdModelChain(it) }
                     }
                 })
-                Log.i(TAG, "Hooked Reels ad caption ctor ${clazz.name}")
+                Log.i(TAG, "[Reels] Hooked Reels ad caption ctor ${clazz.name}")
             }
         }
 
@@ -92,19 +92,19 @@ internal fun installReelsAdDiagnostics(classLoader: ClassLoader, bridge: DexKitB
                     if (count > 60) return
                     Log.i(
                         TAG,
-                        "ReelsAdDiag captionRender ${clazz.name}.${render.name} " +
+                        "[Reels] ReelsAdDiag captionRender ${clazz.name}.${render.name} " +
                             "this=${formatDiagValue(param.thisObject)} args=${formatDiagArgs(param.args)}"
                     )
                 }
             })
-            Log.i(TAG, "Hooked Reels ad caption render ${clazz.name}.${render.name}")
+            Log.i(TAG, "[Reels] Hooked Reels ad caption render ${clazz.name}.${render.name}")
         }
     }
 
     installReelsAdPipelineProbes(classLoader, bridge)
     installReelsInstreamAdBlock(classLoader, bridge)
     installReelsAdListFilters(classLoader, bridge)
-    Log.i(TAG, "Reels ad diagnostics installed components=${componentClasses.keys}")
+    Log.i(TAG, "[Reels] Reels ad diagnostics installed components=${componentClasses.keys}")
 }
 
 // Block full-page Reels ads by forcing the instream eligibility gate to report
@@ -120,7 +120,7 @@ internal fun installReelsInstreamAdBlock(classLoader: ClassLoader, bridge: DexKi
     val userSessionClass = runCatching {
         Class.forName("com.facebook.auth.usersession.FbUserSession", false, classLoader)
     }.getOrNull() ?: run {
-        Log.w(TAG, "Reels instream gate: FbUserSession class not found; skipping")
+        Log.w(TAG, "[Reels] Reels instream gate: FbUserSession class not found; skipping")
         return
     }
     val immutableListClass = runCatching {
@@ -170,12 +170,14 @@ internal fun installReelsInstreamAdBlock(classLoader: ClassLoader, bridge: DexKi
             }
         })
         blocked++
-        Log.i(TAG, "Reels instream ad gate forced to suppress: ${clazz.name}.${method.name}")
+        Log.i(TAG, "[Reels] Reels instream ad gate forced to suppress: ${clazz.name}.${method.name}")
     }
     if (blocked == 0) {
-        Log.w(TAG, "Reels instream ad gate not resolved (candidates=${candidates.size})")
+        Log.w(TAG, "[Reels] Reels instream ad gate not resolved (candidates=${candidates.size})")
     }
 }
+
+// Debug-only: renderables whose model carries a classification outside the
 
 // Debug-only: renderables whose model carries a classification outside the
 // blocklist (e.g. MIDCARD/PARADE/UGC) pass straight through the render block.
@@ -192,7 +194,7 @@ internal val reelsNonAdClassificationSeen: MutableSet<String> =
 // plus disabling the client-side insertion trigger and the sponsored pool fill.
 internal fun installReelsAdListFilters(classLoader: ClassLoader, bridge: DexKitBridge) {
     val classifier = resolveReelsAdClassifier(classLoader, bridge) ?: return
-    Log.i(TAG, "Reels ad classifier resolved: ${classifier.describe()}")
+    Log.i(TAG, "[Reels] Reels ad classifier resolved: ${classifier.describe()}")
 
     // 1. Data controller choke point: A0K(List<C76D>) — each wrapper's list
     //    field holds the InterfaceC190979h4 items pushed into the pager's UI
@@ -211,10 +213,10 @@ internal fun installReelsAdListFilters(classLoader: ClassLoader, bridge: DexKitB
                     List::class.java.isAssignableFrom(method.parameterTypes[0])
             }.forEach { method ->
                 runCatching { hookReelsPagerListPush(method, classifier) }
-                    .onFailure { Log.w(TAG, "Failed to hook reels pager push ${clazz.name}.${method.name}", it) }
+                    .onFailure { Log.w(TAG, "[Reels] Failed to hook reels pager push ${clazz.name}.${method.name}", it) }
             }
         }
-    }.onFailure { Log.w(TAG, "Reels pager push resolution failed", it) }
+    }.onFailure { Log.w(TAG, "[Reels] Reels pager push resolution failed", it) }
 
     // 2. Client-side ad insertion trigger ("maybeInsertAds"): void no-op.
     hookVoidMethodsByString(classLoader, bridge, "VideoHomeDataControllerImpl.maybeInsertAds", "Reels client-side ad insertion disabled")
@@ -332,10 +334,10 @@ internal fun installReelsViewerAdRenderBlock(
                 val clazz = runCatching { candidate.getInstance(classLoader) }.getOrNull() ?: continue
                 hookReelsShoppingRenderable(clazz, reelsRenderHookedMethods, "Reels shopping card blocked (structural)")
             }
-            Log.i(TAG, "Reels shopping renderables for ${shoppingPayloadType.name}: ${matches.size}")
-        }.onFailure { Log.w(TAG, "Reels shopping structural pass failed", it) }
+            Log.i(TAG, "[Reels] Reels shopping renderables for ${shoppingPayloadType.name}: ${matches.size}")
+        }.onFailure { Log.w(TAG, "[Reels] Reels shopping structural pass failed", it) }
     } else {
-        Log.w(TAG, "Reels shopping payload type not resolved from ${shoppingAnchorClasses.size} anchors")
+        Log.w(TAG, "[Reels] Reels shopping payload type not resolved from ${shoppingAnchorClasses.size} anchors")
     }
 
     // Structural pass: renderables with an ad-model-typed field. This covers
@@ -352,8 +354,8 @@ internal fun installReelsViewerAdRenderBlock(
                 val clazz = runCatching { candidate.getInstance(classLoader) }.getOrNull() ?: continue
                 hookReelsAdRenderable(clazz, classifier, reelsRenderHookedMethods, "Reels ad renderable (structural)")
             }
-            Log.i(TAG, "Reels structural renderables for ${modelInterface.name}: ${matches.size}")
-        }.onFailure { Log.w(TAG, "Reels structural renderable resolution failed for ${modelInterface.name}", it) }
+            Log.i(TAG, "[Reels] Reels structural renderables for ${modelInterface.name}: ${matches.size}")
+        }.onFailure { Log.w(TAG, "[Reels] Reels structural renderable resolution failed for ${modelInterface.name}", it) }
     }
 }
 
@@ -767,7 +769,7 @@ internal fun hookReelsPagerListPush(method: Method, classifier: ReelsAdClassifie
             )
         }
     })
-    Log.i(TAG, "Hooked Reels pager ad filter at ${method.declaringClass.name}.${method.name}")
+    Log.i(TAG, "[Reels] Hooked Reels pager ad filter at ${method.declaringClass.name}.${method.name}")
 }
 
 // Persists the reels hook targets discovered by the full DexKit pass so the
@@ -810,8 +812,8 @@ fun saveReelsGuardCache(context: Context, hostVersionName: String) {
             properties.setProperty("snapshots", snapshots.joinToString(","))
             File(context.cacheDir, REELS_GUARD_CACHE_FILE).outputStream().use { properties.store(it, null) }
             lastSavedReelsGuardCachePayload = payload
-            Log.i(TAG, "Saved reels guard cache renderables=${renderables.size} shopping=${shoppingRenderables.size} pagerPush=${reelsGuardPagerPushSpecs.size} snapshots=${reelsGuardSnapshotSpecs.size}")
-        }.onFailure { Log.w(TAG, "Failed to save reels guard cache", it) }
+            Log.i(TAG, "[Cache] Saved reels guard cache renderables=${renderables.size} shopping=${shoppingRenderables.size} pagerPush=${reelsGuardPagerPushSpecs.size} snapshots=${reelsGuardSnapshotSpecs.size}")
+        }.onFailure { Log.w(TAG, "[Cache] Failed to save reels guard cache", it) }
     }
 }
 
@@ -839,11 +841,11 @@ fun installReelsGuardFromCache(
             val properties = Properties()
             file.inputStream().use { properties.load(it) }
             if (hostVersionName != properties.getProperty("version")) {
-                Log.i(TAG, "Reels guard cache stale for version=$hostVersionName; re-discovering")
+                Log.i(TAG, "[Cache] Reels guard cache stale for version=$hostVersionName; re-discovering")
                 return
             }
             if (feedGuardCacheModuleKey() != properties.getProperty("moduleVersion")) {
-                Log.i(TAG, "Reels guard cache stale for moduleVersion; re-discovering")
+                Log.i(TAG, "[Cache] Reels guard cache stale for moduleVersion; re-discovering")
                 return
             }
             reelsGuardCachedInterfaces = properties.getProperty("modelInterfaces").orEmpty()
@@ -1091,7 +1093,7 @@ internal fun hookListBuilderAppend(method: Method, inspector: AdStoryInspector) 
             }
 
             if (removed > 0) {
-                Log.i(TAG, "Removed $removed ad item(s) from upstream list append")
+                Log.i(TAG, "[Reels] Removed $removed ad item(s) from upstream list append")
             }
         }
     })
@@ -1101,12 +1103,12 @@ internal fun hookPluginPackFallback(method: Method, inspector: AdStoryInspector)
     XposedBridge.hookMethod(method, object : XC_MethodHook() {
         override fun beforeHookedMethod(param: MethodHookParam) {
             if (isMarketplaceAdsPluginPack(param.thisObject)) {
-                Log.i(TAG, "Returning an empty plugin pack for marketplace ads (${method.declaringClass.name})")
+                Log.i(TAG, "[Reels] Returning an empty plugin pack for marketplace ads (${method.declaringClass.name})")
                 param.result = arrayListOf<Any?>()
                 return
             }
             if (inspector.containsAdStory(param.thisObject)) {
-                Log.i(TAG, "Returning an empty plugin pack for an ad-backed story")
+                Log.i(TAG, "[Reels] Returning an empty plugin pack for an ad-backed story")
                 param.result = arrayListOf<Any?>()
             }
         }
@@ -1116,7 +1118,7 @@ internal fun hookPluginPackFallback(method: Method, inspector: AdStoryInspector)
             val result = param.result as? MutableList<Any?> ?: return
             val removed = filterAdItems(result, inspector)
             if (removed > 0) {
-                Log.i(TAG, "Removed $removed ad plugin item(s)")
+                Log.i(TAG, "[Reels] Removed $removed ad plugin item(s)")
             }
         }
     })
@@ -1253,7 +1255,7 @@ internal fun hookSponsoredStoryNext(method: Method) {
     XposedBridge.hookMethod(method, object : XC_MethodHook() {
         override fun beforeHookedMethod(param: MethodHookParam) {
             param.result = null
-            Log.i(TAG, "Blocked sponsored story vending from feed manager")
+            Log.i(TAG, "[Reels] Blocked sponsored story vending from feed manager")
         }
     })
 }
@@ -1276,7 +1278,7 @@ internal fun hookSponsoredStoryListMethods(managerClass: Class<*>) {
             })
             hooked++
         }
-    Log.i(TAG, "Hooked $hooked sponsored story list method(s) on ${managerClass.name}")
+    Log.i(TAG, "[Reels] Hooked $hooked sponsored story list method(s) on ${managerClass.name}")
 }
 
 internal fun isSponsoredStoryListMethod(method: Method): Boolean {
@@ -1314,7 +1316,7 @@ internal fun hookStoryAdsMerge(method: Method, source: String) {
             val originalBuckets = param.args.getOrNull(2)
             if (originalBuckets != null) {
                 param.result = originalBuckets
-                Log.i(TAG, "Blocked story ad bucket merge in $source")
+                Log.i(TAG, "[Reels] Blocked story ad bucket merge in $source")
             }
         }
     })
@@ -1324,7 +1326,7 @@ internal fun hookStoryAdsNoOp(method: Method, reason: String, source: String) {
     XposedBridge.hookMethod(method, object : XC_MethodHook() {
         override fun beforeHookedMethod(param: MethodHookParam) {
             param.result = null
-            Log.i(TAG, "Blocked $reason in $source")
+            Log.i(TAG, "[Reels] Blocked $reason in $source")
         }
     })
 }
@@ -1352,7 +1354,7 @@ internal fun hookStoryAdProvider(provider: StoryAdProviderHooks) {
     }
 
     if (hooked.isNotEmpty()) {
-        Log.i(TAG, "Hooked story ad provider ${provider.providerClass.name}: ${hooked.joinToString()}")
+        Log.i(TAG, "[Reels] Hooked story ad provider ${provider.providerClass.name}: ${hooked.joinToString()}")
     }
 }
 
@@ -1373,7 +1375,7 @@ internal fun hookSponsoredPoolListMethods(poolClass: Class<*>) {
             })
             hooked++
         }
-    Log.i(TAG, "Hooked $hooked feed pool list method(s) on ${poolClass.name}")
+    Log.i(TAG, "[Feed] Hooked $hooked feed pool list method(s) on ${poolClass.name}")
 }
 
 internal fun hookSponsoredPoolResultMethods(poolClass: Class<*>) {
@@ -1398,7 +1400,7 @@ internal fun hookSponsoredPoolResultMethods(poolClass: Class<*>) {
             })
             hooked++
         }
-    Log.i(TAG, "Hooked $hooked feed pool result method(s) on ${poolClass.name}")
+    Log.i(TAG, "[Feed] Hooked $hooked feed pool result method(s) on ${poolClass.name}")
 }
 
 internal fun isSponsoredResultCarrier(type: Class<*>): Boolean {
@@ -1432,11 +1434,11 @@ internal fun installReelsStoryHooksPipeline(
             hooks.listBuilderFactoryMethod?.let { hookListResultFilter(it, "list factory", inspector) }
             hooks.pluginPackBuildMethods.forEach { hookPluginPackFallback(it, inspector) }
             installedAny = true
-        }.onFailure { Log.e(TAG, "Failed upstream reels ad hooks", it) }
+        }.onFailure { Log.e(TAG, "[Reels] Failed upstream reels ad hooks", it) }
     } else if (ENABLE_UPSTREAM_REELS_AD_HOOKS) {
-        Log.w(TAG, "Upstream Reels targets unresolved; continuing with independent feed ad hooks")
+        Log.w(TAG, "[Reels] Upstream Reels targets unresolved; continuing with independent feed ad hooks")
     } else {
-        Log.i(TAG, "Skipped upstream Reels list/plugin hooks to preserve feed Reels carousels")
+        Log.i(TAG, "[Reels] Skipped upstream Reels list/plugin hooks to preserve feed Reels carousels")
     }
 
     hooks.instreamBannerEligibilityMethod?.let {
@@ -1447,11 +1449,11 @@ internal fun installReelsStoryHooksPipeline(
     }
     hooks.reelsBannerRenderMethods.forEach { method ->
         runCatching { hookReelsBannerRender(method); installedAny = true }
-            .onFailure { Log.e(TAG, "Failed to hook Reels banner render ${method.declaringClass.name}.${method.name}", it) }
+            .onFailure { Log.e(TAG, "[Reels] Failed to hook Reels banner render ${method.declaringClass.name}.${method.name}", it) }
     }
 
     runCatching { installReelsAdDiagnostics(classLoader, bridge) }
-        .onFailure { Log.w(TAG, "Failed to install Reels ad diagnostics", it) }
+        .onFailure { Log.w(TAG, "[Reels] Failed to install Reels ad diagnostics", it) }
 
     if (ENABLE_STORY_POOL_ADD_HOOKS) {
         val shortsPoolClassNames = runCatching {
@@ -1459,19 +1461,19 @@ internal fun installReelsStoryHooksPipeline(
                 matcher { usingStrings("FbShorts Pool") }
             }.map { it.name }.toSet()
         }.getOrDefault(emptySet())
-        Log.i(TAG, "Shorts pool classes for diagnostics: $shortsPoolClassNames")
+        Log.i(TAG, "[Reels] Shorts pool classes for diagnostics: $shortsPoolClassNames")
         hooks.storyPoolAddMethods.forEach { method ->
             val logAllowed = method.declaringClass.name in shortsPoolClassNames
             runCatching { hookStoryPoolAdd(method, feedItemInspector, logAllowed); installedAny = true }
-                .onFailure { Log.e(TAG, "Failed to hook story pool add ${method.declaringClass.name}.${method.name}", it) }
+                .onFailure { Log.e(TAG, "[Reels] Failed to hook story pool add ${method.declaringClass.name}.${method.name}", it) }
         }
     } else {
-        Log.i(TAG, "Skipped story pool add hooks to isolate feed Reels carousel loading")
+        Log.i(TAG, "[Reels] Skipped story pool add hooks to isolate feed Reels carousel loading")
     }
 
     hooks.storyAdProviders.forEach { provider ->
         runCatching { hookStoryAdProvider(provider); installedAny = true }
-            .onFailure { Log.e(TAG, "Failed to hook story ad source ${provider.providerClass.name}", it) }
+            .onFailure { Log.e(TAG, "[Reels] Failed to hook story ad source ${provider.providerClass.name}", it) }
     }
 
     return installedAny

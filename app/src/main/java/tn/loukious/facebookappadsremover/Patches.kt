@@ -45,15 +45,15 @@ import java.util.concurrent.atomic.AtomicLong
 
 fun installFacebookAdRemover(classLoader: ClassLoader, bridge: DexKitBridge): Boolean {
     return try {
-        Log.i(TAG, "Starting hook install: $BUILD_MARKER")
+        Log.i(TAG, "[Init] Starting hook install: $BUILD_MARKER")
         val hooks = resolveHooks(classLoader, bridge)
         if (!hooks.hasLoadedSecondaryDexTargets()) {
-            Log.w(TAG, "Facebook secondary dex targets are not loaded yet; deferring hook installation")
+            Log.w(TAG, "[Init] Facebook secondary dex targets are not loaded yet; deferring hook installation")
             return false
         }
 
         val feedItemInspector = FeedItemInspector(hooks.storyPoolAddMethods.map { it.parameterTypes[0] })
-        Log.i(TAG, "FeedItemInspector accessors ${feedItemInspector.describeAccessors()}")
+        Log.i(TAG, "[Init] FeedItemInspector accessors ${feedItemInspector.describeAccessors()}")
 
         var feedInstalled = false
         var reelsStoryInstalled = false
@@ -62,19 +62,19 @@ fun installFacebookAdRemover(classLoader: ClassLoader, bridge: DexKitBridge): Bo
         runCatching {
             feedInstalled = installFeedHooksPipeline(classLoader, bridge, hooks, feedItemInspector)
         }.onFailure {
-            Log.e(TAG, "Feed ad pipeline installation failed", it)
+            Log.e(TAG, "[Feed] Feed ad pipeline installation failed", it)
         }
 
         runCatching {
             reelsStoryInstalled = installReelsStoryHooksPipeline(classLoader, bridge, hooks, feedItemInspector)
         }.onFailure {
-            Log.e(TAG, "Reels/Story ad pipeline installation failed", it)
+            Log.e(TAG, "[Reels] Reels/Story ad pipeline installation failed", it)
         }
 
         runCatching {
             gameAdsInstalled = installGameAdsHooksPipeline(classLoader, hooks)
         }.onFailure {
-            Log.e(TAG, "Game ads pipeline installation failed", it)
+            Log.e(TAG, "[GameAds] Game ads pipeline installation failed", it)
         }
 
         runCatching {
@@ -82,16 +82,16 @@ fun installFacebookAdRemover(classLoader: ClassLoader, bridge: DexKitBridge): Bo
             installMarketplaceAdsQueryBlock(classLoader, bridge)
             installMarketplaceFeedResponseFilter(classLoader, bridge)
         }.onFailure {
-            Log.w(TAG, "Marketplace ad pipeline installation failed", it)
+            Log.w(TAG, "[Marketplace] Marketplace ad pipeline installation failed", it)
         }
 
         Log.i(
             TAG,
-            "Pipeline installation summary: feed=$feedInstalled, reelsStory=$reelsStoryInstalled, gameAds=$gameAdsInstalled"
+            "[Init] Pipeline installation summary: feed=$feedInstalled, reelsStory=$reelsStoryInstalled, gameAds=$gameAdsInstalled"
         )
         true
     } catch (t: Throwable) {
-        Log.resolutionFailure(TAG, "Failed to install Facebook ad remover hooks", t)
+        Log.resolutionFailure(TAG, "[Error] Failed to install Facebook ad remover hooks", t)
         false
     }
 }

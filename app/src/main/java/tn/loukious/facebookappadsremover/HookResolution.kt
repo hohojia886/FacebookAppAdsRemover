@@ -110,24 +110,24 @@ internal fun resolveHooks(classLoader: ClassLoader, bridge: DexKitBridge): Resol
     val playableAdActivityOnCreate = resolvePlayableAdActivityOnCreate(classLoader)
     val gameAdUiActivityMethods = resolveGameAdUiActivityMethods(classLoader)
 
-    Log.i(TAG, "Resolved reels list builder=${listBuilderClass?.name ?: "none"}")
-    Log.i(TAG, "Resolved plugin packs=${pluginPackClasses.joinToString { it.name }}")
-    Log.i(TAG, "Resolved banner state eligibility=${instreamBannerEligibilityMethod?.declaringClass?.name ?: "none"}")
-    Log.i(TAG, "Resolved indicator pill eligibility=${indicatorPillAdEligibilityMethod?.declaringClass?.name ?: "none"}")
-    Log.i(TAG, "Resolved Reels banner render hooks=${reelsBannerRenderMethods.joinToString { it.declaringClass.name }}")
-    Log.i(TAG, "Resolved feed CSR filters=${feedCsrFilterHooks.joinToString { "${it.method.declaringClass.name}[list=${it.listArgIndex}]" }}")
-    Log.i(TAG, "Resolved late feed list hooks=${lateFeedListHooks.joinToString { it.method.declaringClass.name }}")
-    Log.i(TAG, "Resolved story pool add hooks=${storyPoolAddMethods.joinToString { it.declaringClass.name }}")
-    Log.i(TAG, "Resolved feed sponsored pool=${sponsoredPoolClass?.name ?: "none"}")
-    Log.i(TAG, "Resolved feed sponsored manager=${sponsoredStoryManagerClass?.name ?: "none"}")
-    Log.i(TAG, "Resolved feed add method=${poolAddMethod?.name ?: "none"}")
-    Log.i(TAG, "Resolved feed next method=${sponsoredStoryNextMethod?.name ?: "none"}")
-    Log.i(TAG, "Resolved story ad source classes=${storyAdProviderClasses.joinToString { it.name }}")
-    Log.i(TAG, "Resolved story ad providers=${storyAdProviders.joinToString { it.providerClass.name }}")
-    Log.i(TAG, "Resolved game ad requests=${gameAdRequestMethods.joinToString { it.declaringClass.name }}")
-    Log.i(TAG, "Resolved game ad bridge=${gameAdBridgePostMessageMethod?.declaringClass?.name ?: "none"}")
-    Log.i(TAG, "Resolved playable ad activity=${playableAdActivityOnCreate?.declaringClass?.name ?: "none"}")
-    Log.i(TAG, "Resolved game ad UI activities=${gameAdUiActivityMethods.joinToString { it.declaringClass.name }}")
+    Log.i(TAG, "[Resolve] Resolved reels list builder=${listBuilderClass?.name ?: "none"}")
+    Log.i(TAG, "[Resolve] Resolved plugin packs=${pluginPackClasses.joinToString { it.name }}")
+    Log.i(TAG, "[Resolve] Resolved banner state eligibility=${instreamBannerEligibilityMethod?.declaringClass?.name ?: "none"}")
+    Log.i(TAG, "[Resolve] Resolved indicator pill eligibility=${indicatorPillAdEligibilityMethod?.declaringClass?.name ?: "none"}")
+    Log.i(TAG, "[Resolve] Resolved Reels banner render hooks=${reelsBannerRenderMethods.joinToString { it.declaringClass.name }}")
+    Log.i(TAG, "[Resolve] Resolved feed CSR filters=${feedCsrFilterHooks.joinToString { "${it.method.declaringClass.name}[list=${it.listArgIndex}]" }}")
+    Log.i(TAG, "[Resolve] Resolved late feed list hooks=${lateFeedListHooks.joinToString { it.method.declaringClass.name }}")
+    Log.i(TAG, "[Resolve] Resolved story pool add hooks=${storyPoolAddMethods.joinToString { it.declaringClass.name }}")
+    Log.i(TAG, "[Resolve] Resolved feed sponsored pool=${sponsoredPoolClass?.name ?: "none"}")
+    Log.i(TAG, "[Resolve] Resolved feed sponsored manager=${sponsoredStoryManagerClass?.name ?: "none"}")
+    Log.i(TAG, "[Resolve] Resolved feed add method=${poolAddMethod?.name ?: "none"}")
+    Log.i(TAG, "[Resolve] Resolved feed next method=${sponsoredStoryNextMethod?.name ?: "none"}")
+    Log.i(TAG, "[Resolve] Resolved story ad source classes=${storyAdProviderClasses.joinToString { it.name }}")
+    Log.i(TAG, "[Resolve] Resolved story ad providers=${storyAdProviders.joinToString { it.providerClass.name }}")
+    Log.i(TAG, "[Resolve] Resolved game ad requests=${gameAdRequestMethods.joinToString { it.declaringClass.name }}")
+    Log.i(TAG, "[Resolve] Resolved game ad bridge=${gameAdBridgePostMessageMethod?.declaringClass?.name ?: "none"}")
+    Log.i(TAG, "[Resolve] Resolved playable ad activity=${playableAdActivityOnCreate?.declaringClass?.name ?: "none"}")
+    Log.i(TAG, "[Resolve] Resolved game ad UI activities=${gameAdUiActivityMethods.joinToString { it.declaringClass.name }}")
     logMissingHooks(
         pluginPackClasses = pluginPackClasses,
         factoryMethod = factoryMethod,
@@ -892,14 +892,14 @@ internal fun resolveReelsAdClassifier(classLoader: ClassLoader, bridge: DexKitBr
     }.asSequence()
         .mapNotNull { runCatching { it.getInstance(classLoader) }.getOrNull() }
         .firstOrNull { it.isEnum } ?: run {
-        Log.w(TAG, "Reels ad classifier: classification enum not found")
+        Log.w(TAG, "[Resolve] Reels ad classifier: classification enum not found")
         return null
     }
     val adValues = enumClass.enumConstants
         .filter { runCatching { it.toString() }.getOrNull() in AD_CLASSIFICATION_VALUES }
         .toSet()
     if (adValues.isEmpty()) {
-        Log.w(TAG, "Reels ad classifier: enum ${enumClass.name} has no ad constants")
+        Log.w(TAG, "[Resolve] Reels ad classifier: enum ${enumClass.name} has no ad constants")
         return null
     }
 
@@ -929,7 +929,7 @@ internal fun resolveReelsAdClassifier(classLoader: ClassLoader, bridge: DexKitBr
         }
         .toList()
     if (modelInterfaces.isEmpty()) {
-        Log.w(TAG, "Reels ad classifier: model interfaces not found")
+        Log.w(TAG, "[Resolve] Reels ad classifier: model interfaces not found")
         return null
     }
     return ReelsAdClassifier(modelInterfaces, adValues).also {
@@ -1032,7 +1032,7 @@ internal fun resolveGameAdUiActivityMethods(classLoader: ClassLoader): List<Meth
     classNames.forEach { className ->
         val activityClass = runCatching { classLoader.loadClass(className) }.getOrNull()
         if (activityClass == null) {
-            Log.w(TAG, "Game ad UI class not loadable: $className")
+            Log.w(TAG, "[Resolve] Game ad UI class not loadable: $className")
             return@forEach
         }
         (activityClass.declaredMethods + activityClass.methods)

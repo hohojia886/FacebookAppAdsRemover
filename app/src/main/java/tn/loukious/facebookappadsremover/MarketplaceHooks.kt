@@ -72,8 +72,8 @@ internal fun installMarketplaceAdRenderBlock(classLoader: ClassLoader, bridge: D
                 val clazz = runCatching { candidate.getInstance(classLoader) }.getOrNull() ?: continue
                 hookMarketplaceAdRenderable(clazz, marketplaceAdRenderHookedMethods, "Marketplace ad component blocked")
             }
-            Log.i(TAG, "Marketplace ad renderables for $anchor: ${matches.size}")
-        }.onFailure { Log.w(TAG, "Marketplace ad render block failed for $anchor", it) }
+            Log.i(TAG, "[Marketplace] Marketplace ad renderables for $anchor: ${matches.size}")
+        }.onFailure { Log.w(TAG, "[Marketplace] Marketplace ad render block failed for $anchor", it) }
     }
 }
 
@@ -113,7 +113,7 @@ internal fun hookMarketplaceAdRenderable(
         hooked++
     }
     if (hooked > 0) {
-        Log.i(TAG, "$label: ${clazz.name} methods=$hooked")
+        Log.i(TAG, "[Marketplace] $label: ${clazz.name} methods=$hooked")
     }
 }
 
@@ -145,8 +145,8 @@ internal fun installMarketplaceAdsQueryBlock(classLoader: ClassLoader, bridge: D
                 marketplaceNetResolvedClassName = clazz.name
             }
         }
-        Log.i(TAG, "Marketplace ads query block installed on $installed Networking module(s)")
-    }.onFailure { Log.w(TAG, "Marketplace ads query block failed", it) }
+        Log.i(TAG, "[Marketplace] Marketplace ads query block installed on $installed Networking module(s)")
+    }.onFailure { Log.w(TAG, "[Marketplace] Marketplace ads query block failed", it) }
 }
 
 // Hooks already installed on these methods (the early cached install and the
@@ -172,7 +172,7 @@ internal fun hookMarketplaceSendRequest(sendRequest: Method): Boolean {
                     if (BuildConfig.DEBUG) {
                         val url = param.args.getOrNull(1) as? String ?: ""
                         if (marketplaceDiagnosedQueries.add("req:$url|$name")) {
-                            Log.i(TAG, "RN request url=$url query=$name len=${body.length}")
+                            Log.i(TAG, "[Marketplace] RN request url=$url query=$name len=${body.length}")
                         }
                     }
                     // The marketplace home feed queries (initial renderer and
@@ -191,7 +191,7 @@ internal fun hookMarketplaceSendRequest(sendRequest: Method): Boolean {
                                 param.args[4] = replacement
                                 logHookHitThrottled("marketplaceFeedAdSkip", sendRequest, "")
                             } else if (BuildConfig.DEBUG) {
-                                Log.w(TAG, "Could not build replacement ReadableMap for feed request")
+                                Log.w(TAG, "[Marketplace] Could not build replacement ReadableMap for feed request")
                             }
                         }
                         return
@@ -219,7 +219,7 @@ fun saveMarketplaceNetGuardCache(context: Context, hostVersionName: String) {
 
     val payload = "$hostVersionName|${feedGuardCacheModuleKey()}|$className"
     if (payload == lastSavedMarketplaceNetCachePayload) {
-        if (BuildConfig.DEBUG) Log.i(TAG, "Marketplace net guard cache payload unchanged; suppressing write")
+        if (BuildConfig.DEBUG) Log.i(TAG, "[Cache] Marketplace net guard cache payload unchanged; suppressing write")
         return
     }
 
@@ -232,9 +232,9 @@ fun saveMarketplaceNetGuardCache(context: Context, hostVersionName: String) {
             properties.setProperty("networkingModule", className)
             file.outputStream().use { properties.store(it, null) }
             lastSavedMarketplaceNetCachePayload = payload
-            Log.i(TAG, "Saved marketplace net guard cache networkingModule=$className")
+            Log.i(TAG, "[Cache] Saved marketplace net guard cache networkingModule=$className")
         }.onFailure {
-            Log.w(TAG, "Failed to save marketplace net guard cache", it)
+            Log.w(TAG, "[Cache] Failed to save marketplace net guard cache", it)
         }
     }
 }
@@ -264,7 +264,7 @@ fun installMarketplaceNetGuardFromCache(
         } ?: return false
         val hooked = hookMarketplaceSendRequest(sendRequest)
         if (hooked) {
-            Log.i(TAG, "Marketplace net guard installed from cache on $className")
+            Log.i(TAG, "[Cache] Marketplace net guard installed from cache on $className")
         }
         hooked
     }.onFailure {
@@ -315,7 +315,7 @@ internal fun rewriteMarketplaceFeedRequestVariables(body: String): String? {
         }
     } catch (throwable: Throwable) {
         if (BuildConfig.DEBUG) {
-            Log.w(TAG, "Failed to parse marketplace feed variables", throwable)
+            Log.w(TAG, "[Marketplace] Failed to parse marketplace feed variables", throwable)
         }
         return null
     }
@@ -411,16 +411,16 @@ internal fun installMarketplaceFeedResponseFilter(classLoader: ClassLoader, brid
                             dir.mkdirs()
                             val file = File(dir, "chunk_${System.currentTimeMillis()}.json")
                             file.writeText(body)
-                            Log.i(TAG, "MP-CHUNK captured len=${body.length} file=${file.name}")
+                            Log.i(TAG, "[Marketplace] MP-CHUNK captured len=${body.length} file=${file.name}")
                         }
                     }
                 })
                 installed++
-                Log.i(TAG, "Marketplace response probe installed on ${clazz.name}.$method")
+                Log.i(TAG, "[Marketplace] Marketplace response probe installed on ${clazz.name}.$method")
             }
         }
-        Log.i(TAG, "Marketplace response probe installed on $installed emitter(s)")
-    }.onFailure { Log.w(TAG, "Marketplace response probe failed", it) }
+        Log.i(TAG, "[Marketplace] Marketplace response probe installed on $installed emitter(s)")
+    }.onFailure { Log.w(TAG, "[Marketplace] Marketplace response probe failed", it) }
 }
 
 internal val marketplaceAdsPackCache = ConcurrentHashMap<String, Boolean>()
