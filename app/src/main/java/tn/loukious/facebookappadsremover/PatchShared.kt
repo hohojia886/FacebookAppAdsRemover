@@ -469,21 +469,26 @@ internal fun invokeMethodByName(target: Any?, methodName: String, vararg args: A
     return runCatching { method.invoke(target, *args) }.getOrNull()
 }
 
+// Opt 2.1: Pre-set isAccessible = true on fields immediately upon resolution
 internal fun allFieldsInHierarchy(type: Class<*>): List<Field> {
     val fields = ArrayList<Field>()
     var current: Class<*>? = type
     while (current != null && current != Any::class.java && fields.size < 200) {
-        fields.addAll(current.declaredFields)
+        val declared = current.declaredFields
+        declared.forEach { field -> field.isAccessible = true }
+        fields.addAll(declared)
         current = current.superclass
     }
     return fields
 }
 
+// Opt 2.1: Pre-set isAccessible = true on methods immediately upon resolution
 internal fun allMethodsInHierarchy(type: Class<*>): List<Method> {
     val methods = LinkedHashMap<String, Method>()
     var current: Class<*>? = type
     while (current != null && current != Any::class.java) {
         current.declaredMethods.forEach { method ->
+            method.isAccessible = true
             methods.putIfAbsent(
                 "${method.name}:${method.parameterTypes.joinToString { it.name }}",
                 method
@@ -613,7 +618,19 @@ internal class ReelsAdClassifier(
     }
 
     private fun resolveAccessorChains(clazz: Class<*>): List<List<Method>> {
+        // Opt 2.2: Fast-path return when modelInterfaces is empty
+        if (modelInterfaces.isEmpty()) return emptyList()
+
         accessorChainsCache[clazz]?.let { return it }
+
+        // Opt 2.2: Fast-path cache emptyList for standard JDK/Android/Primitive types
+        if (clazz.isPrimitive || clazz == String::class.java ||
+            clazz.name.startsWith("java.") || clazz.name.startsWith("android.")
+        ) {
+            accessorChainsCache[clazz] = emptyList()
+            return emptyList()
+        }
+
         val chains = runCatching { findAccessorChains(clazz) }.getOrNull().orEmpty()
         accessorChainsCache[clazz] = chains
         return chains
@@ -625,12 +642,15 @@ internal class ReelsAdClassifier(
     // non-trivial types; deeper nesting has not been seen.
     private fun findAccessorChains(clazz: Class<*>): List<List<Method>>? {
         val chains = ArrayList<List<Method>>()
-        zeroArgMethods(clazz).forEach { candidate ->
+        // Opt 2.2: Localize single zeroArgMethods call to avoid duplicate clazz.methods array copies
+        val zeroArgs = zeroArgMethods(clazz)
+
+        zeroArgs.forEach { candidate ->
             if (modelInterfaces.any { (iface, _) -> candidate.returnType == iface }) {
                 chains.add(listOf(candidate))
             }
         }
-        zeroArgMethods(clazz).forEach { candidate ->
+        zeroArgs.forEach { candidate ->
             val holder = candidate.returnType
             if (holder == clazz || holder.isPrimitive || holder == Void.TYPE ||
                 holder == String::class.java ||
@@ -651,7 +671,7 @@ internal class ReelsAdClassifier(
             !Modifier.isStatic(method.modifiers) &&
                 method.parameterCount == 0 &&
                 method.returnType != Void.TYPE
-        }
+        }.onEach { it.isAccessible = true }
 
     fun isModelType(type: Class<*>): Boolean = modelInterfaces.any { it.first == type }
 

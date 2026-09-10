@@ -539,7 +539,8 @@ internal class FeedItemInspector(
             }
             .sortedByDescending { candidate -> scoreChildAccessor(candidate.returnType) }
             .firstOrNull { candidate ->
-                acceptsValue(invokeNoThrow(candidate.apply { isAccessible = true }, target))
+                // Opt 2.1: Pre-set isAccessible in allInstanceMethods avoids redundant sets per candidate
+                acceptsValue(invokeNoThrow(candidate, target))
             }
     }
 

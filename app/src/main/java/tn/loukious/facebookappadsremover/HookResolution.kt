@@ -537,6 +537,8 @@ internal fun resolveListBuilderMethods(clazz: Class<*>): List<Method> {
     val methods = LinkedHashMap<String, Method>()
     (clazz.declaredMethods + clazz.methods).forEach { method ->
         if (method.name != "<init>" && method.name != "<clinit>") {
+            // Opt 2.1: Pre-set accessibility on candidate methods immediately upon resolution
+            method.isAccessible = true
             methods.putIfAbsent("${method.name}/${method.parameterCount}/${Modifier.isStatic(method.modifiers)}", method)
         }
     }
