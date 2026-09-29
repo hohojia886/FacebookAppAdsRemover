@@ -79,14 +79,16 @@ internal object AiTransparencyInspector {
         return value?.takeIf { it.javaClass.name == STORY_CLASS }
     }
 
+    private val AI_HOLDER_HASH_PAIRS = arrayOf(
+        DETECTED_INFO_HASH to DETECTED_BOOLEAN_HASH,
+        DISCLOSURE_INFO_HASH to DISCLOSURE_BOOLEAN_HASH,
+    )
+
     private fun isPrimaryStoryAi(story: Any): Boolean {
         if (story.javaClass.name != STORY_CLASS) return false
         val getTree = reflectiveMethod(getTreeCache, story.javaClass, "getTree")
             ?: return false
-        for ((holderHash, flagHash) in arrayOf(
-            DETECTED_INFO_HASH to DETECTED_BOOLEAN_HASH,
-            DISCLOSURE_INFO_HASH to DISCLOSURE_BOOLEAN_HASH,
-        )) {
+        for ((holderHash, flagHash) in AI_HOLDER_HASH_PAIRS) {
             val holder = runCatching { getTree.invoke(story, holderHash) }.getOrNull()
                 ?: continue
             // Facebook's own transparency plugin uses getBooleanValue and

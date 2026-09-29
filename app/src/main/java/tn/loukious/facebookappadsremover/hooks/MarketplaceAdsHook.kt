@@ -13,6 +13,7 @@ import java.lang.reflect.Method
 import java.lang.reflect.Modifier
 import java.net.URLDecoder
 import java.net.URLEncoder
+import java.util.Optional
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -500,6 +501,8 @@ object MarketplaceAdsHook {
     // Request body helpers (old Patches.kt, verbatim ports)
     // ------------------------------------------------------------------
 
+    private val readableMapMethodsCache = ConcurrentHashMap<Class<*>, Optional<Pair<Method, Method>>>()
+
     /**
      * The RN Networking module receives its POST body as a ReadableMap with
      * a "string" key. ReadableMap is a host interface, so read it
@@ -507,12 +510,24 @@ object MarketplaceAdsHook {
      */
     private fun requestBodyOf(data: Any?): String? {
         if (data == null) return null
-        val hasKey = data.javaClass.methods.firstOrNull {
-            it.name == "hasKey" && it.parameterCount == 1
-        } ?: return null
-        val getString = data.javaClass.methods.firstOrNull {
-            it.name == "getString" && it.parameterCount == 1
-        } ?: return null
+        val cls = data.javaClass
+        val opt = readableMapMethodsCache.computeIfAbsent(cls) { clazz ->
+            val hasKey = clazz.methods.firstOrNull {
+                it.name == "hasKey" && it.parameterCount == 1
+            }
+            val getString = clazz.methods.firstOrNull {
+                it.name == "getString" && it.parameterCount == 1
+            }
+            val pair = if (hasKey != null && getString != null) {
+                hasKey.isAccessible = true
+                getString.isAccessible = true
+                hasKey to getString
+            } else null
+            Optional.ofNullable(pair)
+        }
+        val methodsPair = opt.orElse(null) ?: return null
+
+        val (hasKey, getString) = methodsPair
         return runCatching {
             if (hasKey.invoke(data, "string") != true) {
                 return@runCatching null

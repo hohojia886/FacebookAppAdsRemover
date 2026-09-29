@@ -411,6 +411,26 @@ object AdFilterHook {
         // null value would NPE on ConcurrentHashMap.put.
         private val hasFieldValueCache = ConcurrentHashMap<Class<*>, java.util.Optional<Method>>()
 
+        private val declaredFieldsCache = ConcurrentHashMap<Class<*>, List<Field>>()
+
+        private fun fieldsFor(cls: Class<*>): List<Field> {
+            return declaredFieldsCache.computeIfAbsent(cls) { clazz ->
+                val list = ArrayList<Field>()
+                var current: Class<*>? = clazz
+                while (current != null && current != Any::class.java) {
+                    for (f in current.declaredFields) {
+                        if (f.isSynthetic || Modifier.isStatic(f.modifiers)) continue
+                        val t = f.type
+                        if (t.isPrimitive || t == String::class.java || t.isArray) continue
+                        runCatching { f.isAccessible = true }
+                        list.add(f)
+                    }
+                    current = current.superclass
+                }
+                list
+            }
+        }
+
         /**
          * True if the object is a sponsored story or wraps one. Mirrors the
          * mod's classifier: any GraphQLStory in the wrapper chain with a
@@ -421,19 +441,9 @@ object AdFilterHook {
             if (isSponsoredTree(obj)) return true
             if (isSkippable(obj)) return false
             return try {
-                // Wrapper types (FeedProps and friends): test every object
-                // field one level deep — the mod walked the same parent chain.
-                var cls: Class<*> = obj.javaClass
-                while (cls != null && cls != Any::class.java) {
-                    for (f in cls.declaredFields) {
-                        if (f.isSynthetic || Modifier.isStatic(f.modifiers)) continue
-                        val t = f.type
-                        if (t.isPrimitive || t == String::class.java || t.isArray) continue
-                        f.isAccessible = true
-                        val v = runCatching { f.get(obj) }.getOrNull() ?: continue
-                        if (v !== obj && !isSkippable(v) && isSponsoredTree(v)) return true
-                    }
-                    cls = cls.superclass
+                for (f in fieldsFor(obj.javaClass)) {
+                    val v = runCatching { f.get(obj) }.getOrNull() ?: continue
+                    if (v !== obj && !isSkippable(v) && isSponsoredTree(v)) return true
                 }
                 false
             } catch (t: Throwable) {

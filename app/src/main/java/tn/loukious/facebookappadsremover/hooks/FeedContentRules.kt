@@ -26,11 +26,28 @@ internal object FeedContentRules {
     fun enabledCategoryNames(): Set<String> = config().enabledCategories +
         (if (Settings.getBoolean(Settings.ADS_NEWS_FEED, true)) setOf("SPONSORED") else emptySet())
 
+    private var lastRawKeywords: String? = null
+    private var cachedKeywordList: List<String> = emptyList()
+
     fun config(): FeedFilterConfig {
-        val keywords = if (Settings.getBoolean(Settings.FEED_KEYWORDS_ENABLED, false)) {
+        val rawKeywords = if (Settings.getBoolean(Settings.FEED_KEYWORDS_ENABLED, false)) {
             Settings.getString(Settings.FEED_KEYWORDS, "")
-                .split(',', ';', '\n').map { it.trim().lowercase() }.filter { it.isNotEmpty() }
-        } else emptyList()
+        } else {
+            ""
+        }
+        
+        val keywords = if (rawKeywords.isEmpty()) {
+            emptyList()
+        } else {
+            if (rawKeywords != lastRawKeywords) {
+                cachedKeywordList = rawKeywords.split(',', ';', '\n')
+                    .map { it.trim().lowercase() }
+                    .filter { it.isNotEmpty() }
+                lastRawKeywords = rawKeywords
+            }
+            cachedKeywordList
+        }
+
         return FeedFilterConfig(
             ads = Settings.getBoolean(Settings.ADS_NEWS_FEED, true),
             feedGuard = Settings.getBoolean(Settings.ADS_FEED_GUARD, true),

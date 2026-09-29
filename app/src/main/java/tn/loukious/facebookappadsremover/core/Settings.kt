@@ -165,10 +165,12 @@ object Settings {
         })
     }
 
+    private val MARKETPLACE_GAME_KEYS = setOf(ADS_MARKETPLACE, ADS_GAME_ADS)
+
     /** Reads a toggle; safe on hot paths and before [init]. */
     fun getBoolean(key: String, default: Boolean): Boolean = prefs?.let { source ->
         runCatching {
-            if (key in setOf(ADS_MARKETPLACE, ADS_GAME_ADS) &&
+            if (key in MARKETPLACE_GAME_KEYS &&
                 !source.getBoolean(AdSettingsMigration.MARKER, false) &&
                 source.contains(LEGACY_ADS_ENABLED) &&
                 !source.getBoolean(LEGACY_ADS_ENABLED, true)) {

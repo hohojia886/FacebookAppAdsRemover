@@ -14,6 +14,7 @@ import org.luckypray.dexkit.DexKitBridge
 import org.luckypray.dexkit.query.enums.StringMatchType
 import java.lang.reflect.Field
 import java.lang.reflect.Method
+import java.lang.reflect.Modifier
 import java.util.Collections
 import java.util.WeakHashMap
 import java.util.concurrent.ConcurrentHashMap
@@ -250,21 +251,28 @@ object NewsfeedFilterHook {
         return true
     }
 
+    private val holderFieldCache = ConcurrentHashMap<Class<*>, Field>()
+
     /**
      * The Runnable holds its owner state in a synthetic field (this.A01 → the
      * collection holder). Names drift per release, so locate it structurally:
      * the field whose value declares an ImmutableCollection field.
      */
     private fun findHolderField(runnable: Any): Field? {
-        var cls: Class<*>? = runnable.javaClass
-        while (cls != null) {
-            for (f in cls.declaredFields) {
-                if (java.lang.reflect.Modifier.isStatic(f.modifiers)) continue
+        val cls = runnable.javaClass
+        holderFieldCache[cls]?.let { return it }
+        var current: Class<*>? = cls
+        while (current != null) {
+            for (f in current.declaredFields) {
+                if (Modifier.isStatic(f.modifiers)) continue
                 f.isAccessible = true
                 val v = runCatching { f.get(runnable) }.getOrNull() ?: continue
-                if (findCollectionField(v) != null) return f
+                if (findCollectionField(v) != null) {
+                    holderFieldCache[cls] = f
+                    return f
+                }
             }
-            cls = cls.superclass
+            current = current.superclass
         }
         return null
     }
@@ -374,16 +382,27 @@ object NewsfeedFilterHook {
             }
         }
 
+        private val pendingScanRunnables = Collections.synchronizedMap(WeakHashMap<View, Runnable>())
+        private val inheritsFromCache = ConcurrentHashMap<Pair<Class<*>, String>, Boolean>()
+
         override fun intercept(chain: XposedInterface.Chain): Any? {
             val result = chain.proceed()
+            if (!Settings.getBoolean(Settings.FEED_AI_CONTENT, false)) return result
             val recycler = chain.thisObject as? ViewGroup ?: return result
             if (!looksLikeMainFeedRecycler(recycler)) return result
-            // Do not create Litho accessibility nodes during mount/layout: that
-            // can mutate Facebook's accessibility tree while it is assembling.
-            // Query already-mounted virtual nodes on the next idle frame only.
-            recycler.postDelayed({
+            
+            // Debounce: cancel any existing pending scan for this recycler
+            val existing = pendingScanRunnables.remove(recycler)
+            if (existing != null) {
+                recycler.removeCallbacks(existing)
+            }
+            
+            val runnable = Runnable {
+                pendingScanRunnables.remove(recycler)
                 if (recycler.isAttachedToWindow) scanRecycler(recycler)
-            }, 650L)
+            }
+            pendingScanRunnables[recycler] = runnable
+            recycler.postDelayed(runnable, 650L)
             return result
         }
 
@@ -412,7 +431,7 @@ object NewsfeedFilterHook {
             }
         }
 
-        fun onDescription(view: View, description: String?) {
+        fun onDescription(view: View, description: CharSequence?) {
             if (!Settings.getBoolean(Settings.FEED_AI_CONTENT, false) || !isAiLabel(description)) return
             val (recycler, row) = findEnclosingFeedRow(view) ?: return
             L.i(TAG, "AI content label on real View: ${view.javaClass.name}")
@@ -448,11 +467,19 @@ object NewsfeedFilterHook {
         }
 
         private fun inheritsFrom(instance: Any, className: String): Boolean {
-            var cls: Class<*>? = instance.javaClass
-            while (cls != null) {
-                if (cls.name == className) return true
-                cls = cls.superclass
+            val cls = instance.javaClass
+            val key = cls to className
+            inheritsFromCache[key]?.let { return it }
+            
+            var current: Class<*>? = cls
+            while (current != null) {
+                if (current.name == className) {
+                    inheritsFromCache[key] = true
+                    return true
+                }
+                current = current.superclass
             }
+            inheritsFromCache[key] = false
             return false
         }
 
@@ -462,8 +489,8 @@ object NewsfeedFilterHook {
             var visited = 0
             while (stack.isNotEmpty() && visited++ < MAX_DESCENDANTS) {
                 val view = stack.removeLast()
-                if (isAiLabel(view.contentDescription?.toString())) return true
-                if (view is TextView && isAiLabel(view.text?.toString())) return true
+                if (isAiLabel(view.contentDescription)) return true
+                if (view is TextView && isAiLabel(view.text)) return true
                 // Facebook's LithoViews expose the AI badge as virtual
                 // accessibility nodes, not View children. This is the same
                 // semantic tree visible in `uiautomator dump`.
@@ -504,8 +531,8 @@ object NewsfeedFilterHook {
                 val node = pending.removeLast()
                 scan.virtualNodes++
                 try {
-                    if (isAiLabel(node.text?.toString()) ||
-                        isAiLabel(node.contentDescription?.toString())
+                    if (isAiLabel(node.text) ||
+                        isAiLabel(node.contentDescription)
                     ) {
                         scan.virtualMatches++
                         // Recycle any queued nodes before returning.
@@ -548,11 +575,16 @@ object NewsfeedFilterHook {
             runCatching { node.recycle() }
         }
 
-        private fun isAiLabel(value: String?): Boolean {
-            val text = value?.trim().orEmpty()
-            return text.equals(AI_UI_LABEL, ignoreCase = true) ||
-                text.startsWith("$AI_UI_LABEL•", ignoreCase = true) ||
-                text.startsWith("$AI_UI_LABEL ·", ignoreCase = true)
+        private fun isAiLabel(value: CharSequence?): Boolean {
+            if (value == null || value.length < AI_UI_LABEL.length) return false
+            
+            // Fast prefix/equality check without allocation
+            if (!value.startsWith(AI_UI_LABEL, ignoreCase = true)) return false
+            
+            if (value.length == AI_UI_LABEL.length) return true
+            
+            val nextChar = value[AI_UI_LABEL.length]
+            return nextChar == '•' || (nextChar == ' ' && value.length > AI_UI_LABEL.length + 1 && value[AI_UI_LABEL.length + 1] == '·')
         }
 
         private fun hideRow(row: View) {
@@ -583,7 +615,7 @@ object NewsfeedFilterHook {
         override fun intercept(chain: XposedInterface.Chain): Any? {
             val result = chain.proceed()
             val view = chain.thisObject as? View ?: return result
-            AiUiFallbackHook.onDescription(view, chain.args.getOrNull(0)?.toString())
+            AiUiFallbackHook.onDescription(view, chain.args.getOrNull(0) as? CharSequence)
             return result
         }
     }

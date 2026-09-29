@@ -192,13 +192,57 @@ object FeedGuardHook {
     /** Pipeline adapters share the rule engine, not an ad-only switch. */
     private fun engine(pipeline: FeedPipeline): FeedFilterEngine =
         FeedContentRules.engine(pipeline, cacheSignals)
+        
+    private class FeedItemContext(val item: Any) {
+        private var stateMask = 0
+        private var _model: Any? = null
+        private var _edge: Any? = null
+        
+        fun getModel(inspector: FeedItemInspector): Any? {
+            if ((stateMask and 1) == 0) {
+                _model = inspector.invokeItemModelAccessor(item)
+                stateMask = stateMask or 1
+            }
+            return _model
+        }
+        
+        fun getEdge(inspector: FeedItemInspector): Any? {
+            if ((stateMask and 2) == 0) {
+                _edge = inspector.internalEdgeFrom(item)
+                stateMask = stateMask or 2
+            }
+            return _edge
+        }
+    }
 
     private val cacheSignals = object : FeedItemSignals {
-        override fun category(item: Any): String? = inspector().categoryForFilter(item)
-        override fun sponsored(item: Any): Boolean = inspector().isDefinitelySponsoredFeedItem(item)
-        override fun aiContent(item: Any): Boolean = inspector().isAiContentFeedItem(item)
+        // We use a ThreadLocal to memoize the reflection lookups for the current item
+        // being evaluated by the rules engine, avoiding redundant work across rules.
+        private val currentContext = ThreadLocal<FeedItemContext>()
+        
+        override fun category(item: Any): String? {
+            return inspector().categoryForFilter(item, getContext(item))
+        }
+        
+        override fun sponsored(item: Any): Boolean {
+            return inspector().isDefinitelySponsoredFeedItem(item, getContext(item))
+        }
+        
+        override fun aiContent(item: Any): Boolean {
+            return inspector().isAiContentFeedItem(item, getContext(item))
+        }
+        
         override fun searchableText(item: Any): String? =
             runCatching { item.toString() }.getOrNull()
+            
+        private fun getContext(item: Any): FeedItemContext {
+            var ctx = currentContext.get()
+            if (ctx == null || ctx.item !== item) {
+                ctx = FeedItemContext(item)
+                currentContext.set(ctx)
+            }
+            return ctx
+        }
     }
 
     private fun inspector(): FeedItemInspector {
@@ -1082,18 +1126,18 @@ object FeedGuardHook {
         )
 
         /** The same category signal used by the classic feed's category rules. */
-        fun categoryForFilter(value: Any?): String? {
+        fun categoryForFilter(value: Any?, ctx: FeedItemContext? = null): String? {
             if (value == null) return null
-            val model = invokeNoThrow(itemModelAccessor, value)
-            val edge = edgeFrom(value)
+            val model = ctx?.getModel(this) ?: invokeItemModelAccessor(value)
+            val edge = ctx?.getEdge(this) ?: internalEdgeFrom(value)
             return readCategory(model) ?: readCategory(value) ?:
                 readEdgeCategory(edge) ?: readCategory(edge)
         }
 
         /** Cached rows often wrap the GraphQL edge in a storage-pool item. */
-        fun isAiContentFeedItem(value: Any?): Boolean {
+        fun isAiContentFeedItem(value: Any?, ctx: FeedItemContext? = null): Boolean {
             if (value == null) return false
-            val edge = edgeFrom(value)
+            val edge = ctx?.getEdge(this) ?: internalEdgeFrom(value)
             // A storage item can contain related stories, attachments and
             // comments. Do not classify the whole wrapper before identifying
             // the feed row's primary GraphQLFeedUnitEdge: that can hide an
@@ -1114,10 +1158,10 @@ object FeedGuardHook {
          * content — that's what separates it from the heuristic signal scan
          * the old port used for the story pool.
          */
-        fun isDefinitelySponsoredFeedItem(value: Any?): Boolean {
+        fun isDefinitelySponsoredFeedItem(value: Any?, ctx: FeedItemContext? = null): Boolean {
             if (value == null) return false
 
-            val model = invokeNoThrow(itemModelAccessor, value)
+            val model = ctx?.getModel(this) ?: invokeItemModelAccessor(value)
             val modelCategory = readCategory(model)
             if (isSafeFeedContainerCategory(modelCategory)) {
                 return false
@@ -1126,7 +1170,7 @@ object FeedGuardHook {
                 return true
             }
 
-            val edge = edgeFrom(value)
+            val edge = ctx?.getEdge(this) ?: internalEdgeFrom(value)
             val edgeCategory = readEdgeCategory(edge) ?: readCategory(edge)
             if (isSafeFeedContainerCategory(edgeCategory)) {
                 return false
@@ -1193,7 +1237,9 @@ object FeedGuardHook {
             )
         }
 
-        private fun edgeFrom(value: Any?): Any? {
+        internal fun invokeItemModelAccessor(value: Any?): Any? = invokeNoThrow(itemModelAccessor, value)
+
+        internal fun internalEdgeFrom(value: Any?): Any? {
             if (value == null) return null
             if (value.javaClass.name == GRAPHQL_FEED_UNIT_EDGE_CLASS) return value
 
@@ -1211,6 +1257,8 @@ object FeedGuardHook {
             }
             return invokeNoThrow(fallback, value)
         }
+
+        private fun edgeFrom(value: Any?): Any? = internalEdgeFrom(value)
 
         private fun feedUnitFrom(edge: Any?): Any? {
             if (edge == null) return null
@@ -1384,8 +1432,7 @@ object FeedGuardHook {
 
         private fun isAdSignalText(value: String?): Boolean {
             if (value.isNullOrBlank()) return false
-            val normalized = value.lowercase()
-            return FEED_AD_SIGNAL_TOKENS.any { token -> normalized.contains(token) }
+            return FEED_AD_SIGNAL_TOKENS.any { token -> value.contains(token, ignoreCase = true) }
         }
 
         /** Declared instance methods up the hierarchy plus interfaces, deduped by name+arity. */

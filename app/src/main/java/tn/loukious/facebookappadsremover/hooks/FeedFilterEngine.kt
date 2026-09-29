@@ -16,10 +16,45 @@ internal interface FeedItemSignals {
 }
 
 internal class FeedItemFacts(val item: Any, private val signals: FeedItemSignals) {
-    val category: String? by lazy(LazyThreadSafetyMode.NONE) { signals.category(item) }
-    val sponsored: Boolean by lazy(LazyThreadSafetyMode.NONE) { signals.sponsored(item) }
-    val aiContent: Boolean by lazy(LazyThreadSafetyMode.NONE) { signals.aiContent(item) }
-    val searchableText: String? by lazy(LazyThreadSafetyMode.NONE) { signals.searchableText(item) }
+    private var stateMask = 0
+    private var _category: String? = null
+    private var _searchableText: String? = null
+
+    val category: String?
+        get() {
+            if ((stateMask and 1) == 0) {
+                _category = signals.category(item)
+                stateMask = stateMask or 1
+            }
+            return _category
+        }
+
+    val sponsored: Boolean
+        get() {
+            if ((stateMask and 2) == 0) {
+                if (signals.sponsored(item)) stateMask = stateMask or 16
+                stateMask = stateMask or 2
+            }
+            return (stateMask and 16) != 0
+        }
+
+    val aiContent: Boolean
+        get() {
+            if ((stateMask and 4) == 0) {
+                if (signals.aiContent(item)) stateMask = stateMask or 32
+                stateMask = stateMask or 4
+            }
+            return (stateMask and 32) != 0
+        }
+
+    val searchableText: String?
+        get() {
+            if ((stateMask and 8) == 0) {
+                _searchableText = signals.searchableText(item)
+                stateMask = stateMask or 8
+            }
+            return _searchableText
+        }
 }
 
 internal interface FeedFilterRule {
@@ -46,16 +81,10 @@ internal class FeedFilterEngine(
 
     val active: Boolean get() = rules.isNotEmpty()
 
-    fun decide(item: Any?): Decision = decide(item, null)
-
-    private fun decide(item: Any?, evaluations: MutableMap<String, Int>?): Decision {
+    fun decide(item: Any?): Decision {
         if (item == null) return Decision(null)
         val facts = FeedItemFacts(item, signals)
-        // First-match precedence is explicit and shared across every pipeline.
         for (rule in rules) {
-            if (evaluations != null) {
-                evaluations[rule.id] = (evaluations[rule.id] ?: 0) + 1
-            }
             if (runCatching { rule.matches(facts) }.getOrDefault(false)) {
                 return Decision(rule.id)
             }
@@ -64,20 +93,39 @@ internal class FeedFilterEngine(
     }
 
     fun partition(items: Iterable<*>): Partition {
-        val kept = ArrayList<Any?>()
-        val counts = LinkedHashMap<String, Int>()
-        val evaluated = LinkedHashMap<String, Int>()
+        val kept = if (items is Collection<*>) ArrayList<Any?>(items.size) else ArrayList<Any?>()
+        val counts = IntArray(rules.size)
+        val evaluated = IntArray(rules.size)
         var inspected = 0
         for (item in items) {
             inspected++
-            val decision = decide(item, evaluated)
-            if (decision.remove) {
-                val id = decision.ruleId!!
-                counts[id] = (counts[id] ?: 0) + 1
-            } else {
+            if (item == null) {
+                kept.add(null)
+                continue
+            }
+            val facts = FeedItemFacts(item, signals)
+            var removed = false
+            for (i in rules.indices) {
+                evaluated[i]++
+                val rule = rules[i]
+                if (runCatching { rule.matches(facts) }.getOrDefault(false)) {
+                    counts[i]++
+                    removed = true
+                    break
+                }
+            }
+            if (!removed) {
                 kept.add(item)
             }
         }
-        return Partition(kept, counts, evaluated, inspected)
+        
+        val countsMap = LinkedHashMap<String, Int>()
+        val evaluatedMap = LinkedHashMap<String, Int>()
+        for (i in rules.indices) {
+            if (counts[i] > 0) countsMap[rules[i].id] = counts[i]
+            if (evaluated[i] > 0) evaluatedMap[rules[i].id] = evaluated[i]
+        }
+        
+        return Partition(kept, countsMap, evaluatedMap, inspected)
     }
 }
