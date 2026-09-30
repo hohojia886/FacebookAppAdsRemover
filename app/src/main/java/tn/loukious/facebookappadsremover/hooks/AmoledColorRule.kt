@@ -22,24 +22,20 @@ internal object AmoledColorRule {
         "TAB_BAR_BACKGROUND", "BACKGROUND_BANNER", "BACKGROUND_PRIMARY_UI",
     )
 
-    /** Measured Facebook chrome colours Morphe's literal sweep blackens. */
-    private val KNOWN_LITERAL_BACKGROUNDS = setOf(
-        0xFF101011.toInt(),
-        0xFF171818.toInt(),
-        0xFF202021.toInt(),
-        0xFF242526.toInt(),
-        0xFF252728.toInt(),
-        0xFF333334.toInt(),
-    )
 
     fun resolver(color: Int, tokenName: String?): Int = when {
         tokenName in BACKGROUND_TOKENS && isSemanticBackgroundNeutral(color) -> BLACK
         else -> color
     }
 
-    fun untokened(color: Int): Int = when {
-        color in KNOWN_LITERAL_BACKGROUNDS || isDarkNeutral(color) -> BLACK
-        else -> color
+    fun untokened(color: Int): Int = when (color) {
+        0xFF101011.toInt(),
+        0xFF171818.toInt(),
+        0xFF202021.toInt(),
+        0xFF242526.toInt(),
+        0xFF252728.toInt(),
+        0xFF333334.toInt() -> BLACK
+        else -> if (isDarkNeutral(color)) BLACK else color
     }
 
     fun isDarkNeutral(color: Int): Boolean {

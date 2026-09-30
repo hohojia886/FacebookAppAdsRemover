@@ -1,6 +1,7 @@
 package tn.loukious.facebookappadsremover.hooks
 
 import tn.loukious.facebookappadsremover.core.Settings
+import java.util.concurrent.ConcurrentHashMap
 
 /** The supported Facebook entry points all use the same rule order/config. */
 internal enum class FeedPipeline { CLASSIC, CSR_CACHE, LATE_CACHE, LITHO_RENDER }
@@ -58,8 +59,22 @@ internal object FeedContentRules {
     }
 
     /** Snapshot settings per list/render, not per item; changing a toggle needs no new APK. */
-    fun engine(pipeline: FeedPipeline, signals: FeedItemSignals): FeedFilterEngine =
-        engine(pipeline, signals, config())
+    private var lastConfig: FeedFilterConfig? = null
+    private val engineCache = ConcurrentHashMap<FeedPipeline, FeedFilterEngine>()
+
+    fun engine(pipeline: FeedPipeline, signals: FeedItemSignals): FeedFilterEngine {
+        val currentConfig = config()
+        if (lastConfig != currentConfig) {
+            engineCache.clear()
+            lastConfig = currentConfig
+        }
+        var engine = engineCache[pipeline]
+        if (engine == null) {
+            engine = engine(pipeline, signals, currentConfig)
+            engineCache[pipeline] = engine
+        }
+        return engine
+    }
 
     fun engine(
         pipeline: FeedPipeline,

@@ -39,6 +39,8 @@ import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam
 import org.luckypray.dexkit.DexKitBridge
 import java.io.File
 import java.lang.reflect.Method
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 /**
  * Modern (libxposed API) module entry point.
@@ -208,12 +210,19 @@ class ModuleMain : XposedModule() {
         // The secondary dexes are injected into the app classloader's
         // dexElements some time after onCreate (dextricks async init). Retry
         // the probe until all stable classes resolve, then run discovery.
-        val main = android.os.Handler(android.os.Looper.getMainLooper())
+        // RUN ALL DISCOVERY/INSTALL OFF THE MAIN THREAD to avoid blocking the UI
+        // on cold starts or updates.
+        val executor = Executors.newSingleThreadScheduledExecutor()
+        executor.submit { probeAndMaybeDiscover(context) }
+        
         val delays = longArrayOf(1000, 3000, 7000, 15000, 30000)
         for (d in delays) {
-            main.postDelayed({ probeAndMaybeDiscover(context) }, d)
+            executor.schedule(
+                { probeAndMaybeDiscover(context) },
+                d,
+                TimeUnit.MILLISECONDS
+            )
         }
-        probeAndMaybeDiscover(context)
     }
 
     private var accountHookTried = false
@@ -227,6 +236,12 @@ class ModuleMain : XposedModule() {
 
     private fun probeAndMaybeDiscover(context: Context) {
         val classLoader = context.classLoader ?: return
+        if (discoveryRan && accountHookTried && paramsHookTried &&
+            clipboardHookTried && darkActivityHookTried && amoledResolversReady &&
+            newsfeedUiFallbackReady && navigationTabNativeReady
+        ) {
+            return
+        }
         if (!accountHookTried) {
             accountHookTried = AccountHook.install(this, classLoader)
             if (accountHookTried) L.i(TAG, "Account capture hook installed")

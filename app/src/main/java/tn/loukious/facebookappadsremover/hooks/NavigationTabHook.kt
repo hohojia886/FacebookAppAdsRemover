@@ -213,6 +213,10 @@ object NavigationTabHook {
     private fun reconcile(layout: LinearLayout, options: Enabled) {
         val count = layout.childCount
         if (count !in 3..8) return
+        val hasTabDesc = (0 until count).any { idx ->
+            layout.getChildAt(idx)?.contentDescription?.contains("tab", ignoreCase = true) == true
+        }
+        if (!hasTabDesc && !hasHiddenChild(layout)) return
         val children = (0 until count).map(layout::getChildAt)
         val destinations = NavigationTabPolicy.identify(
             children.map { it.contentDescription?.toString() },

@@ -58,12 +58,22 @@ internal object NavigationTabPolicy {
         if (tabs.any { it == null }) return null
         val resolved = tabs.filterNotNull()
         if (resolved.any { it.total != descriptions.size }) return null
-        if (resolved.map { it.position }.toSet().size != resolved.size) return null
+        if (hasDuplicatePositions(resolved)) return null
         if (resolved.none { it.destination == Destination.HOME }) return null
         if (resolved.none {
                 it.destination == Destination.NOTIFICATIONS || it.destination == Destination.MENU
             }) return null
         return resolved.map { it.destination }
+    }
+
+    private fun hasDuplicatePositions(tabs: List<Tab>): Boolean {
+        var mask = 0
+        for (tab in tabs) {
+            val bit = 1 shl tab.position
+            if ((mask and bit) != 0) return true
+            mask = mask or bit
+        }
+        return false
     }
 
     fun hide(destination: Destination, reels: Boolean, marketplace: Boolean, games: Boolean): Boolean =

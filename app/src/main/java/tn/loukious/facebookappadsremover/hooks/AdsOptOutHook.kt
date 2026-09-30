@@ -121,8 +121,10 @@ object AdsOptOutHook {
         }
     }
 
+    private val ALL_AD_SURFACES = setOf(AdSurface.NEWS_FEED, AdSurface.STORIES, AdSurface.REELS)
+
     private fun spoofEnabled(): Boolean =
-        Settings.blockAdsOn(setOf(AdSurface.NEWS_FEED, AdSurface.STORIES, AdSurface.REELS)) &&
+        Settings.blockAdsOn(ALL_AD_SURFACES) &&
             Settings.getBoolean(Settings.ADS_MARKETPLACE, true) &&
             Settings.getBoolean(Settings.ADS_GAME_ADS, true)
 }
