@@ -1381,13 +1381,25 @@ object FeedGuardHook {
                 }?.apply { isAccessible = true }
         }
 
+        private val DANGEROUS_MUTATOR_PREFIXES = arrayOf(
+            "set", "reset", "clear", "remove", "delete", "destroy",
+            "detach", "recycle", "flush", "close", "init", "update",
+            "cancel", "dispose", "write", "put", "add", "pop", "drain",
+            "mutate", "bind", "unbind", "attach", "finish", "stop"
+        )
+
         /**
          * Probes 0-arg object-returning methods, best-scored type first, and
          * returns the first whose invocation [acceptsValue] — each accessor
          * is resolved once per class and cached.
+         *
+         * Mutators, clear/reset/lifecycle methods and fluent builder setters
+         * are strictly excluded to prevent corrupting image attachments or
+         * resetting GraphQL models during reflection probing.
          */
         private fun resolveChildAccessor(target: Any, acceptsValue: (Any?) -> Boolean): Method? {
-            return allInstanceMethods(target.javaClass)
+            val targetClass = target.javaClass
+            return allInstanceMethods(targetClass)
                 .asSequence()
                 .filter { candidate ->
                     candidate.parameterCount == 0 &&
@@ -1395,7 +1407,9 @@ object FeedGuardHook {
                         candidate.returnType != Void.TYPE &&
                         candidate.returnType != String::class.java &&
                         !candidate.returnType.isEnum &&
-                        candidate.declaringClass != Any::class.java
+                        candidate.returnType != targetClass &&
+                        candidate.declaringClass != Any::class.java &&
+                        DANGEROUS_MUTATOR_PREFIXES.none { candidate.name.startsWith(it, ignoreCase = true) }
                 }
                 .sortedByDescending { candidate -> scoreChildAccessor(candidate.returnType) }
                 .firstOrNull { candidate ->
